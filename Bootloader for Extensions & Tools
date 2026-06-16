@@ -1,7 +1,7 @@
 require "import"
 import "android.widget.*"
 local dlg = LuaDialog()
-dlg.setTitle("Tech For V I")
+dlg.setTitle("class 18")
 local layout = {
 LinearLayout;
 orientation = "vertical";
