@@ -1,1 +1,35 @@
-f
+require "import"
+import "android.widget.*"
+local dlg = LuaDialog()
+dlg.setTitle("Tech For V I")
+local layout = {
+LinearLayout;
+orientation = "vertical";
+padding = "30dp";
+{
+Button;
+text = "Developer Sabir Jamil";
+textSize = "16sp";
+layout_marginBottom = "15dp";
+onClick = function()
+end;
+};
+{
+Button;
+text = "About";
+textSize = "16sp";
+layout_marginBottom = "15dp";
+onClick = function()
+end;
+};
+{
+Button;
+text = "Exit";
+textSize = "16sp";
+onClick = function()
+dlg.dismiss()
+end;
+};
+}
+dlg.setView(loadlayout(layout))
+dlg.show()
