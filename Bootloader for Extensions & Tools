@@ -1,35 +1,437 @@
 require "import"
 import "android.widget.*"
-local dlg = LuaDialog()
-dlg.setTitle("class 18")
-local layout = {
-LinearLayout;
-orientation = "vertical";
-padding = "30dp";
-{
-Button;
-text = "Developer Sabir Jamil";
-textSize = "16sp";
-layout_marginBottom = "15dp";
-onClick = function()
-end;
-};
-{
-Button;
-text = "About";
-textSize = "16sp";
-layout_marginBottom = "15dp";
-onClick = function()
-end;
-};
-{
-Button;
-text = "Exit";
-textSize = "16sp";
-onClick = function()
-dlg.dismiss()
-end;
-};
-}
-dlg.setView(loadlayout(layout))
-dlg.show()
+import "android.view.*"
+import "android.os.*"
+import "java.io.*"
+import "android.app.AlertDialog"
+import "android.content.Intent"
+import "android.net.Uri"
+import "android.util.Base64"
+import "android.text.TextWatcher"
+import "android.graphics.drawable.GradientDrawable"
+import "android.content.Context"
+import "android.widget.Toast"
+import "com.androlua.Http"
+import "android.widget.ListView"
+import "android.widget.ArrayAdapter"
+import "android.widget.SearchView"
+import "android.view.inputmethod.InputMethodManager"
+import "cjson"
+import "android.graphics.Color"
+import "android.provider.MediaStore"
+import "android.app.DownloadManager"
+import "android.text.InputType"
+import "android.widget.LinearLayout$LayoutParams"
+import "android.graphics.Typeface"
+import "java.net.URLEncoder"
+import "java.lang.System"
+
+local String = luajava.bindClass("java.lang.String")
+local JBase64 = luajava.bindClass("android.util.Base64")
+local File = luajava.bindClass("java.io.File")
+local FileOutputStream = luajava.bindClass("java.io.FileOutputStream")
+local FileWriter = luajava.bindClass("java.io.FileWriter")
+local BufferedWriter = luajava.bindClass("java.io.BufferedWriter")
+local BufferedReader = luajava.bindClass("java.io.BufferedReader")
+local FileReader = luajava.bindClass("java.io.FileReader")
+local Thread = luajava.bindClass("java.lang.Thread")
+
+local sdCard = tostring(Environment.getExternalStorageDirectory())
+local EXT_PATH = sdCard .. "/解说/Plugins/"
+local TOOL_PATH = sdCard .. "/解说/Tools/"
+
+local appName = "Bootloader for Extensions & Tools By Tech For V I"
+
+local function showMsg(text)
+  Toast.makeText(service, text, Toast.LENGTH_SHORT).show()
+end
+
+local function jieshuoCopy(text)
+    service.copy(text)
+    service.speak("Code copied successfully")
+end
+
+local function showTextInputDialog(hint, callback)
+  local inputLayout = LinearLayout(service)
+  inputLayout.setOrientation(1)
+  inputLayout.setPadding(40, 40, 40, 40)
+  local title = TextView(service)
+  title.setText(hint)
+  title.setTextSize(16)
+  title.setGravity(Gravity.CENTER)
+  title.setPadding(0, 0, 0, 20)
+  inputLayout.addView(title)
+  local textBox = EditText(service)
+  textBox.setHint("Type here...")
+  textBox.setGravity(Gravity.TOP)
+  textBox.setLayoutParams(LinearLayout.LayoutParams(-1, 200))
+  inputLayout.addView(textBox)
+  local btnLayout = LinearLayout(service)
+  btnLayout.setOrientation(0)
+  btnLayout.setLayoutParams(LinearLayout.LayoutParams(-1, -2))
+  local okBtn = Button(service)
+  okBtn.setText("OK")
+  okBtn.setBackgroundColor(0xFF2E7D32)
+  okBtn.setTextColor(0xFFFFFFFF)
+  local okParams = LinearLayout.LayoutParams(0, -2, 1)
+  okParams.setMargins(0, 10, 5, 0)
+  okBtn.setLayoutParams(okParams)
+  btnLayout.addView(okBtn)
+  local cancelBtn = Button(service)
+  cancelBtn.setText("CANCEL")
+  cancelBtn.setBackgroundColor(0xFF9E9E9E)
+  cancelBtn.setTextColor(0xFFFFFFFF)
+  local cancelParams = LinearLayout.LayoutParams(0, -2, 1)
+  cancelParams.setMargins(5, 10, 0, 0)
+  cancelBtn.setLayoutParams(cancelParams)
+  btnLayout.addView(cancelBtn)
+  inputLayout.addView(btnLayout)
+  local inputDialog = AlertDialog.Builder(service)
+  inputDialog.setTitle("Enter Text")
+  inputDialog.setView(inputLayout)
+  local dlg = inputDialog.create()
+  dlg.getWindow().setType(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY)
+  cancelBtn.onClick = function()
+    dlg.dismiss()
+  end
+  okBtn.onClick = function()
+    local text = textBox.getText().toString()
+    dlg.dismiss()
+    if text ~= "" then
+      callback(text)
+    end
+  end
+  dlg.show()
+end
+
+-- Bootloader code variable (global for copy function access)
+local generatedBootloaderCode = ""
+
+-- Create ScrollView wrapper
+local scrollView = ScrollView(service)
+scrollView.setLayoutParams(LinearLayout.LayoutParams(-1, -1))
+
+-- Main container layout inside ScrollView
+local layout = LinearLayout(service)
+layout.setOrientation(1)
+layout.setPadding(40, 40, 40, 40)
+layout.setBackgroundColor(0xFFFFFFFF)
+
+local titleText = TextView(service)
+titleText.setText("Bootloader for Extensions & Tools")
+titleText.setTextSize(20)
+titleText.setGravity(Gravity.CENTER)
+titleText.setTextColor(0xFF2E7D32)
+layout.addView(titleText)
+
+local devText = TextView(service)
+devText.setText("Developer: Sabir Jamil")
+devText.setTextSize(14)
+devText.setGravity(Gravity.CENTER)
+devText.setPadding(0, 0, 0, 20)
+layout.addView(devText)
+
+-- Main Lua Direct Link input
+local mainLuaEdit = EditText(service)
+mainLuaEdit.setHint("Enter GitHub Raw URL of main.lua...")
+mainLuaEdit.setPadding(20, 20, 20, 20)
+local editParams = LinearLayout.LayoutParams(-1, -2)
+editParams.setMargins(0, 10, 0, 10)
+mainLuaEdit.setLayoutParams(editParams)
+layout.addView(mainLuaEdit)
+
+-- Code display area (initially hidden)
+local codeScrollView = ScrollView(service)
+codeScrollView.setLayoutParams(LinearLayout.LayoutParams(-1, 200))
+codeScrollView.setVisibility(View.GONE)
+
+local codeTextView = TextView(service)
+codeTextView.setTextSize(12)
+codeTextView.setTypeface(Typeface.MONOSPACE)
+codeTextView.setPadding(10, 10, 10, 10)
+codeTextView.setTextColor(0xFF000000)
+codeTextView.setBackgroundColor(0xFFF5F5F5)
+codeTextView.setSingleLine(true)
+codeTextView.setHorizontallyScrolling(true)
+
+codeScrollView.addView(codeTextView)
+layout.addView(codeScrollView)
+
+-- Copy button (initially hidden)
+local copyBtn = Button(service)
+copyBtn.setText("COPY CODE")
+copyBtn.setBackgroundColor(0xFFFF9800)
+copyBtn.setTextColor(0xFFFFFFFF)
+copyBtn.setLayoutParams(LinearLayout.LayoutParams(-1, -2))
+copyBtn.setVisibility(View.GONE)
+layout.addView(copyBtn)
+
+-- Row 3: Three buttons in a single line
+local row3 = LinearLayout(service)
+row3.setOrientation(0)
+row3.setLayoutParams(LinearLayout.LayoutParams(-1, -2))
+
+local generateBtn = Button(service)
+generateBtn.setText("GENERATE BOOTLOADER CODE")
+generateBtn.setBackgroundColor(0xFF2E7D32)
+generateBtn.setTextColor(0xFFFFFFFF)
+local btnParams = LinearLayout.LayoutParams(0, -2, 1)
+btnParams.setMargins(0, 10, 5, 10)
+generateBtn.setLayoutParams(btnParams)
+row3.addView(generateBtn)
+
+local aboutBtn = Button(service)
+aboutBtn.setText("ABOUT & SUPPORT")
+aboutBtn.setBackgroundColor(0xFF2196F3)
+aboutBtn.setTextColor(0xFFFFFFFF)
+aboutBtn.setLayoutParams(btnParams)
+row3.addView(aboutBtn)
+
+local exitBtn = Button(service)
+exitBtn.setText("EXIT")
+exitBtn.setBackgroundColor(0xFF9E9E9E)
+exitBtn.setTextColor(0xFFFFFFFF)
+exitBtn.setLayoutParams(btnParams)
+row3.addView(exitBtn)
+
+layout.addView(row3)
+
+-- Add layout to ScrollView
+scrollView.addView(layout)
+
+-- Create dialog with ScrollView
+local mainDlg = AlertDialog.Builder(service).setView(scrollView).create()
+mainDlg.getWindow().setType(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY)
+mainDlg.show()
+
+local function generateBootloaderCode()
+  local userMainLink = tostring(mainLuaEdit.getText())
+  
+  if userMainLink == "" or userMainLink == "nil" then
+    showMsg("Error: Please enter GitHub Raw URL!")
+    return
+  end
+  
+  -- Convert to raw URL
+  local rawUrl = userMainLink
+  if rawUrl:match("github.com") and not rawUrl:match("raw.githubusercontent.com") then
+    rawUrl = rawUrl:gsub("github.com", "raw.githubusercontent.com")
+    rawUrl = rawUrl:gsub("/blob/", "/")
+  end
+  
+  -- Generate bootloader code
+  local bootloaderCode = [[require "import"
+import "com.androlua.Http"
+import "android.widget.Toast"
+import "java.io.File"
+
+local scriptUrl = "]] .. rawUrl .. [["
+local scriptPath = service.getLuaDir() .. "/bootloaded_script.lua"
+
+Http.get(scriptUrl, function(code, content)
+    if code == 200 and content then
+        local file = io.open(scriptPath, "w")
+        if file then
+            file:write(content)
+            file:close()
+            Toast.makeText(service, "Script loaded successfully!", Toast.LENGTH_SHORT).show()
+            
+            -- Execute the downloaded script
+            local func, err = loadfile(scriptPath)
+            if func then
+                func()
+            else
+                Toast.makeText(service, "Error executing script: " .. tostring(err), Toast.LENGTH_LONG).show()
+            end
+        else
+            Toast.makeText(service, "Error saving script file!", Toast.LENGTH_LONG).show()
+        end
+    else
+        Toast.makeText(service, "Failed to download script! HTTP Code: " .. tostring(code), Toast.LENGTH_LONG).show()
+    end
+end)]]
+  
+  generatedBootloaderCode = bootloaderCode
+  
+  codeTextView.setText(bootloaderCode)
+  codeScrollView.setVisibility(View.VISIBLE)
+  generateBtn.setVisibility(View.GONE)
+  copyBtn.setVisibility(View.VISIBLE)
+  showMsg("Bootloader code generated!")
+end
+
+copyBtn.onClick = function()
+  if generatedBootloaderCode ~= "" then
+    jieshuoCopy(generatedBootloaderCode)
+    showMsg("Code copied to clipboard!")
+  else
+    showMsg("No code to copy!")
+  end
+end
+
+aboutBtn.onClick = function()
+  local help_views = {}
+  local help_layout = {
+    LinearLayout,
+    orientation = "vertical",
+    padding = "16dp",
+    layout_width = "fill",
+    layout_height = "wrap",
+    {
+      TextView,
+      text = "Bootloader for Extensions & Tools provides professional script loading system for Jieshuo developers.\n\nMAIN FEATURES:\n• One-click Bootloader Generation\n• GitHub Raw URL support\n• Secure script execution\n• Light-weight and Fast\n\nThis bootloader system helps you load and execute Lua scripts directly from GitHub raw URLs, making distribution and updates seamless.\n\nJoin our community for more useful tools and suggestions.";
+      textSize = 14,
+      textColor = "#666666",
+      gravity = "left",
+      paddingBottom = "20dp",
+    },
+    {
+      TextView,
+      text = "Join Our Community",
+      textSize = 16,
+      textColor = "#000000",
+      gravity = "center",
+      paddingBottom = "10dp",
+    },
+    {
+      ScrollView,
+      layout_width = "fill",
+      layout_height = "wrap_content",
+      {
+        LinearLayout,
+        orientation = "vertical",
+        layout_width = "fill",
+        layout_height = "wrap_content",
+        gravity = "center",
+        layout_marginTop = "5dp",
+        {
+          Button,
+          id = "joinWhatsAppGroupButton",
+          text = "JOIN WHATSAPP GROUP",
+          layout_width = "fill",
+          layout_height = "wrap_content",
+          layout_margin = "2dp",
+          textSize = "12sp",
+          padding = "8dp",
+          backgroundColor = "#25D366",
+          textColor = "#FFFFFF",
+        },
+        {
+          Button,
+          id = "joinYouTubeChannelButton",
+          text = "JOIN YOUTUBE CHANNEL",
+          layout_width = "fill",
+          layout_height = "wrap_content",
+          layout_margin = "2dp",
+          textSize = "12sp",
+          padding = "8dp",
+          backgroundColor = "#FF0000",
+          textColor = "#FFFFFF",
+        },
+        {
+          Button,
+          id = "joinTelegramChannelButton",
+          text = "JOIN TELEGRAM CHANNEL",
+          layout_width = "fill",
+          layout_height = "wrap_content",
+          layout_margin = "2dp",
+          textSize = "12sp",
+          padding = "8dp",
+          backgroundColor = "#2196F3",
+          textColor = "#FFFFFF",
+        },
+        {
+          Button,
+          id = "goBackButton",
+          text = "GO BACK",
+          layout_width = "fill",
+          layout_height = "wrap_content",
+          layout_margin = "2dp",
+          textSize = "12sp",
+          padding = "8dp",
+          backgroundColor = "#9E9E9E",
+          textColor = "#FFFFFF",
+        },
+      },
+    },
+  }
+  local help_dialog = AlertDialog.Builder(service)
+  help_dialog.setTitle("Developer: Sabir Jamil")
+  help_dialog.setView(loadlayout(help_layout, help_views))
+  local dObj = help_dialog.create()
+  dObj.getWindow().setType(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY)
+  dObj.setCancelable(true)
+  
+  help_views.joinWhatsAppGroupButton.onClick = function()
+    local function performActions()
+      dObj.dismiss()
+      if mainDlg then
+        mainDlg.dismiss()
+      end
+      local message = "Assalam%20o%20Alaikum.%20I%20hope%20you%20are%20doing%20well.%20I%20would%20like%20to%20join%20your%20WhatsApp%20group.%20Kindly%20share%20the%20instructions.%20group%20rules%20and%20regulations.%20Thank%20you.%20so%20much"
+      local url = "https://wa.me/923486623399?text=" .. message
+      local intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
+      intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+      service.startActivity(intent)
+    end
+    if service and service.speak then
+      service.speak("Opening WhatsApp Group")
+      Handler().postDelayed(Runnable{run=performActions}, 1000)
+    else
+      performActions()
+    end
+  end
+  
+  help_views.joinYouTubeChannelButton.onClick = function()
+    local function performActions()
+      dObj.dismiss()
+      if mainDlg then
+        mainDlg.dismiss()
+      end
+      local intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://youtube.com/@techforvi"))
+      intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+      service.startActivity(intent)
+    end
+    if service and service.speak then
+      service.speak("Opening YouTube Channel")
+      Handler().postDelayed(Runnable{run=performActions}, 1000)
+    else
+      performActions()
+    end
+  end
+  
+  help_views.joinTelegramChannelButton.onClick = function()
+    local function performActions()
+      dObj.dismiss()
+      if mainDlg then
+        mainDlg.dismiss()
+      end
+      local url = "tg://resolve?domain=TechForVI"
+      local intent = Intent(Intent.ACTION_VIEW)
+      intent.setData(Uri.parse(url))
+      intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+      service.startActivity(intent)
+      return true
+    end
+    if service and service.speak then
+      service.speak("Opening Telegram Channel")
+      Handler().postDelayed(Runnable{run=performActions}, 1000)
+    else
+      performActions()
+    end
+  end
+  
+  help_views.goBackButton.onClick = function()
+    dObj.dismiss()
+  end
+  
+  dObj.show()
+end
+
+generateBtn.onClick = function()
+  generateBootloaderCode()
+end
+
+exitBtn.onClick = function() 
+  mainDlg.dismiss() 
+end
