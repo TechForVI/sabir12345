@@ -1,820 +1,1456 @@
 require "import"
 import "android.widget.*"
 import "android.view.*"
+import "android.content.*"
 import "android.os.*"
-import "java.io.*"
+import "java.io.File"
+import "android.database.sqlite.SQLiteDatabase"
+import "android.content.ContentValues"
+import "android.text.TextUtils"
+import "android.view.inputmethod.InputMethodManager"
+import "android.graphics.Typeface"
 import "android.app.AlertDialog"
 import "android.content.Intent"
 import "android.net.Uri"
-import "android.util.Base64"
-import "android.text.TextWatcher"
-import "android.graphics.drawable.GradientDrawable"
-import "android.content.Context"
-import "android.widget.Toast"
-import "com.androlua.Http"
-import "android.widget.ListView"
-import "android.widget.ArrayAdapter"
-import "android.widget.SearchView"
-import "android.view.inputmethod.InputMethodManager"
-import "cjson"
-import "android.graphics.Color"
-import "android.provider.MediaStore"
-import "android.app.DownloadManager"
-import "android.text.InputType"
-import "android.widget.LinearLayout$LayoutParams"
-import "android.graphics.Typeface"
-import "java.net.URLEncoder"
-import "java.lang.System"
-import "android.media.ToneGenerator"
-import "android.media.AudioManager"
 
-local String = luajava.bindClass("java.lang.String")
-local JBase64 = luajava.bindClass("android.util.Base64")
-local File = luajava.bindClass("java.io.File")
-local FileOutputStream = luajava.bindClass("java.io.FileOutputStream")
-local FileWriter = luajava.bindClass("java.io.FileWriter")
-local BufferedWriter = luajava.bindClass("java.io.BufferedWriter")
-local BufferedReader = luajava.bindClass("java.io.BufferedReader")
-local FileReader = luajava.bindClass("java.io.FileReader")
-local Thread = luajava.bindClass("java.lang.Thread")
+-- ==================== کانٹیکسٹ چیک (مکمل طور پر درست) ====================
+local ctx = activity
+if not ctx then
+    ctx = service
+end
+if not ctx then
+    ctx = this
+end
+if not ctx then
+    -- آخری آپشن کے طور پر Application Context لیں
+    ctx = luajava.bindClass("android.app.ActivityThread"):currentApplication():getApplicationContext()
+end
+if not ctx then
+    print("Error: No valid context found")
+    return
+end
 
-local sdCard = tostring(Environment.getExternalStorageDirectory())
-local EXT_PATH = sdCard .. "/解说/Plugins/"
-local TOOL_PATH = sdCard .. "/解说/Tools/"
+local backupPath = "/sdcard/Download/My Clipboard Manager Backup/"
+local dbFile = backupPath .. "storage.db"
 
-local appName = "Auto Update Injector By Tech For V I"
+local folder = File(backupPath)
+if not folder.exists() then folder.mkdirs() end
 
--- About & Support Server Configuration
-local BASE_URL = "https://jieshuo-resources-for-coding-by-tec.vercel.app/"
-local SERVER_FILES = {
-    ["About & Support"] = "ABOUT & SUPPORT",
+-- ==================== گوگل لگ ان کنفیگریشن ====================
+local client_id = "241806017107-1r55qsfqod0san52pnpngu3oejm4acd2.apps.googleusercontent.com"
+local redirect_uri = "https://google-backup-server-habv.vercel.app/api"
+
+-- ==================== پیجینیشن ویری ایبلز ====================
+local ITEMS_PER_PAGE = 1000
+local currentOffset = 0
+local favCurrentOffset = 0
+local allClipboardData = {}
+local allFavoriteData = {}
+
+-- ==================== ڈیٹا بیس انیشیلائزیشن ====================
+local function initDB()
+    local d = SQLiteDatabase.openOrCreateDatabase(dbFile, nil)
+    d.execSQL("CREATE TABLE IF NOT EXISTS clipboard_history (id INTEGER PRIMARY KEY AUTOINCREMENT, content TEXT UNIQUE, time DATETIME DEFAULT CURRENT_TIMESTAMP)")
+    d.execSQL("CREATE TABLE IF NOT EXISTS favorite_history (id INTEGER PRIMARY KEY AUTOINCREMENT, content TEXT UNIQUE, time DATETIME DEFAULT CURRENT_TIMESTAMP)")
+    d.execSQL("CREATE TABLE IF NOT EXISTS user_info (id INTEGER PRIMARY KEY AUTOINCREMENT, user_name TEXT, user_email TEXT, login_time DATETIME DEFAULT CURRENT_TIMESTAMP)")
+    d.execSQL("CREATE TABLE IF NOT EXISTS access_tokens (id INTEGER PRIMARY KEY AUTOINCREMENT, access_token TEXT UNIQUE, refresh_token TEXT, token_time DATETIME DEFAULT CURRENT_TIMESTAMP)")
+    d.close()
+end
+initDB()
+
+-- ==================== یوزر انفو سیو کریں ====================
+local function saveUserInfo(name, email)
+    local d = SQLiteDatabase.openOrCreateDatabase(dbFile, nil)
+    d.delete("user_info", nil, nil)
+    local values = ContentValues()
+    values.put("user_name", name)
+    values.put("user_email", email)
+    d.insert("user_info", nil, values)
+    d.close()
+end
+
+-- ==================== ایکسیس ٹوکن سیو کریں ====================
+local function saveAccessToken(access_token, refresh_token)
+    local d = SQLiteDatabase.openOrCreateDatabase(dbFile, nil)
+    d.delete("access_tokens", nil, nil)
+    local values = ContentValues()
+    values.put("access_token", access_token)
+    if refresh_token and refresh_token ~= "" then
+        values.put("refresh_token", refresh_token)
+    end
+    d.insert("access_tokens", nil, values)
+    d.close()
+end
+
+-- ==================== یوزر انفو لوڈ کریں ====================
+local function getUserInfo()
+    local d = SQLiteDatabase.openOrCreateDatabase(dbFile, nil)
+    local cursor = d.rawQuery("SELECT user_name, user_email FROM user_info ORDER BY id DESC LIMIT 1", nil)
+    local name, email = nil, nil
+    if cursor and cursor.getCount() > 0 then
+        cursor.moveToFirst()
+        if not cursor.isNull(0) then name = cursor.getString(0) end
+        if not cursor.isNull(1) then email = cursor.getString(1) end
+    end
+    if cursor then cursor.close() end
+    d.close()
+    return name, email
+end
+
+-- ==================== لاگ آؤٹ ====================
+local function logout()
+    local d = SQLiteDatabase.openOrCreateDatabase(dbFile, nil)
+    d.delete("user_info", nil, nil)
+    d.delete("access_tokens", nil, nil)
+    d.close()
+    
+    Toast.makeText(ctx, "Logged out successfully", Toast.LENGTH_SHORT).show()
+    if btnUser then
+        btnUser.setText("USER NAME")
+    end
+end
+
+-- ==================== مینوئل ٹوکن سیو ====================
+local function saveManualTokens(input, loginDialog)
+    local access, refresh, name, email = input:match("([^|]+)|([^|]*)|([^|]*)|([^|]*)")
+    
+    if access then
+        -- ٹوکن سیو کریں
+        saveAccessToken(access, refresh or "")
+        
+        -- یوزر انفو سیو کریں
+        if name and name ~= "" then
+            saveUserInfo(name, email or "")
+        end
+        
+        -- کامیابی کا میسیج
+        Toast.makeText(ctx, "✓ Login Successful!", Toast.LENGTH_SHORT).show()
+        
+        -- یوزر بٹن اپڈیٹ کریں
+        if name and name ~= "" and btnUser then
+            btnUser.setText(name)
+        end
+        
+        -- لاگ ان ڈائیلاگ بند کریں
+        if loginDialog then
+            loginDialog.dismiss()
+        end
+    else
+        Toast.makeText(ctx, "Invalid Key Format", Toast.LENGTH_LONG).show()
+    end
+end
+
+-- ==================== لاگ ان ڈائیلاگ ====================
+local function showLoginDialog()
+    if not ctx then return end
+    
+    local loginLayout = {
+        LinearLayout,
+        orientation = "vertical",
+        padding = "20dp",
+        layout_width = "match_parent",
+        {
+            TextView,
+            text = "Google Drive Login",
+            textSize = "20sp",
+            textColor = "#2196F3",
+            gravity = "center",
+            layout_marginBottom = "20dp"
+        },
+        {
+            Button,
+            id = "loginBtnGetToken",
+            text = "GET ACCESS TOKEN",
+            layout_width = "match_parent",
+            backgroundColor = "#4CAF50",
+            textColor = "#FFFFFF",
+            layout_marginBottom = "15dp"
+        },
+        {
+            EditText,
+            id = "loginEtToken",
+            hint = "Paste your token here...",
+            layout_width = "match_parent",
+            layout_marginBottom = "20dp",
+            padding = "12dp",
+            backgroundColor = "#F5F5F5",
+            singleLine = true
+        },
+        {
+            LinearLayout,
+            orientation = "horizontal",
+            layout_width = "match_parent",
+            gravity = "center",
+            {
+                Button,
+                id = "loginBtnCancel",
+                text = "GO BACK",
+                layout_weight = 1,
+                layout_marginRight = "5dp",
+                backgroundColor = "#F44336",
+                textColor = "#FFFFFF",
+                padding = "12dp"
+            },
+            {
+                Button,
+                id = "loginBtnLogin",
+                text = "LOGIN",
+                layout_weight = 1,
+                layout_marginLeft = "5dp",
+                backgroundColor = "#2196F3",
+                textColor = "#FFFFFF",
+                padding = "12dp"
+            }
+        }
+    }
+    
+    local loginDialog = LuaDialog(ctx)
+    loginDialog.setTitle("Login Required")
+    loginDialog.setView(loadlayout(loginLayout))
+    
+    loginBtnGetToken.onClick = function()
+        loginDialog.dismiss()
+        
+        local scopes = "https://www.googleapis.com/auth/drive.file " .. 
+                       "https://www.googleapis.com/auth/userinfo.profile " .. 
+                       "https://www.googleapis.com/auth/userinfo.email"
+                       
+        local auth_url = "https://accounts.google.com/o/oauth2/v2/auth?"..
+                         "client_id="..client_id..
+                         "&redirect_uri="..Uri.encode(redirect_uri)..
+                         "&response_type=code"..
+                         "&scope="..Uri.encode(scopes)..
+                         "&access_type=offline"..
+                         "&prompt=consent"
+        
+        ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(auth_url)))
+    end
+    
+    loginBtnLogin.onClick = function()
+        local token_data = tostring(loginEtToken.getText()):gsub("%s+", "")
+        if #token_data > 20 then
+            saveManualTokens(token_data, loginDialog)
+        else
+            Toast.makeText(ctx, "Please enter a valid token", Toast.LENGTH_SHORT).show()
+        end
+    end
+    
+    loginBtnCancel.onClick = function()
+        loginDialog.dismiss()
+    end
+    
+    loginDialog.show()
+end
+
+-- ==================== آئٹم لے آؤٹ ====================
+local item_layout = {
+    LinearLayout,
+    layout_width = "match_parent",
+    layout_height = "wrap_content",
+    {
+        TextView,
+        id = "text_item",
+        layout_width = "match_parent",
+        layout_height = "wrap_content",
+        padding = "16dp",
+        textSize = "16sp",
+        textColor = "#212121",
+        singleLine = true,
+        ellipsize = "end"
+    }
 }
 
--- cachedDescription متغیر
-local cachedDescription = "Auto Update Injector Professional - Inject auto update functionality into your plugins with sound, vibration, and new features support."
+-- ==================== مین لے آؤٹ ====================
+local mainLayout = {
+    LinearLayout,
+    orientation = "vertical",
+    padding = "10dp",
+    layout_width = "match_parent",
+    layout_height = "match_parent",
+    -- ٹاپ لیفٹ میں USER NAME بٹن
+    {
+        LinearLayout,
+        layout_width = "match_parent",
+        orientation = "horizontal",
+        layout_marginBottom = "5dp",
+        {
+            Button,
+            id = "btnUser",
+            text = "USER NAME",
+            textSize = "12sp",
+            layout_width = "wrap_content",
+            layout_height = "40dp",
+            backgroundColor = "#607D8B",
+            textColor = "#FFFFFF"
+        },
+        -- خالی جگہ بھرنے کے لیے
+        {
+            View,
+            layout_width = "0dp",
+            layout_height = "1dp",
+            layout_weight = 1
+        }
+    },
+    -- سرچ باکس
+    {
+        EditText,
+        id = "mainEtSearch",
+        hint = "Type to search...",
+        layout_width = "match_parent",
+        layout_height = "wrap_content",
+        visibility = "gone",
+        backgroundColor = "#FFFFFF",
+        padding = "10dp",
+        textSize = "16sp",
+        singleLine = true
+    },
+    -- کی ورڈ بٹن
+    {
+        Button,
+        id = "btnKeyword",
+        text = "ENTER KEYWORD",
+        layout_width = "match_parent",
+        layout_height = "wrap_content",
+        backgroundColor = "#2196F3",
+        textColor = "#FFFFFF"
+    },
+    -- لسٹ
+    {
+        ListView,
+        id = "lvClipboard",
+        layout_width = "match_parent",
+        layout_height = "0dp",
+        layout_weight = 1,
+        dividerHeight = "1dp",
+        backgroundColor = "#F5F5F5"
+    },
+    -- لوڈ مور بٹن
+    {
+        Button,
+        id = "btnLoadMore",
+        text = "LOAD MORE ITEMS",
+        layout_width = "match_parent",
+        layout_height = "wrap_content",
+        backgroundColor = "#4CAF50",
+        textColor = "#FFFFFF",
+        textSize = "14sp",
+        visibility = "gone",
+        layout_marginTop = "5dp",
+        layout_marginBottom = "5dp"
+    },
+    -- کینسل بٹن (سرچ کے وقت)
+    {
+        Button,
+        id = "mainBtnSearchCancel",
+        text = "CANCEL",
+        layout_width = "match_parent",
+        layout_height = "wrap_content",
+        visibility = "gone",
+        backgroundColor = "#F44336",
+        textColor = "#FFFFFF"
+    },
+    -- مین بٹن کنٹینر (4 بٹن)
+    {
+        LinearLayout,
+        id = "mainButtonsContainer",
+        layout_width = "match_parent",
+        layout_height = "wrap_content",
+        orientation = "horizontal",
+        {
+            Button,
+            text = "Backup and restore",
+            id = "btnBackupRestore",
+            layout_weight = 1,
+            backgroundColor = "#4CAF50",
+            textColor = "#FFFFFF"
+        },
+        {
+            Button,
+            text = "ABOUT AND SUPPORT",
+            id = "btnAbout",
+            layout_weight = 1,
+            backgroundColor = "#9C27B0",
+            textColor = "#FFFFFF"
+        },
+        {
+            Button,
+            text = "EXIT",
+            id = "btnExit",
+            layout_weight = 1,
+            backgroundColor = "#F44336",
+            textColor = "#FFFFFF"
+        },
+        {
+            Button,
+            text = "FAVORITE",
+            id = "btnFav",
+            layout_weight = 1,
+            backgroundColor = "#FF9800",
+            textColor = "#FFFFFF"
+        }
+    }
+}
 
-local DESCRIPTION_URL = "https://raw.githubusercontent.com/TechForVI/Auto-Update-Injector/main/Description"
+local dlg = LuaDialog(ctx)
+dlg.setTitle("My Clipboard Manager")
+dlg.setView(loadlayout(mainLayout))
 
-_G.APP_NAME = "Auto Update Injector By Tech For V I"
-_G.shouldShowMain = true
+-- مین ایڈاپٹر
+local mainAdapter = LuaAdapter(ctx, {}, item_layout)
+lvClipboard.setAdapter(mainAdapter)
 
-local function trim(s)
-    if s == nil then return "" end
-    return tostring(s):gsub("^%s*(.-)%s*$", "%1")
-end
-
-local function showMsg(text)
-    Toast.makeText(service, text, Toast.LENGTH_SHORT).show()
-end
-
-local function speakMsg(text)
-    if service and service.speak then
-        service.speak(tostring(text))
-    end
-end
-
-local function convertToRawUrl(url)
-    if url:match("github.com") and not url:match("raw.githubusercontent.com") then
-        url = url:gsub("github.com", "raw.githubusercontent.com")
-        url = url:gsub("/blob/", "/")
-    end
-    return url
-end
-
--- Preloaded data
-local preloadedAboutSupport = nil
-local preloadComplete = false
-
-local function preloadAboutSupport()
-    Thread(luajava.bindClass("java.lang.Runnable"){
-        run = function()
-            Http.get(BASE_URL .. "ABOUT & SUPPORT", function(code, response)
-                if code == 200 and response and trim(response) ~= "" then
-                    local finalResponse = "local descriptionText = [[" .. cachedDescription:gsub("%]", "] ]") .. "]]\n\n" .. response
-                    preloadedAboutSupport = finalResponse
-                    preloadComplete = true
-                end
-            end)
-        end
-    }).start()
-end
-
-local function loadAndExecuteFromServer(fileName, optionTitle)
-    if optionTitle == "About & Support" then
-        if preloadComplete and preloadedAboutSupport then
-            local chunk, err = load(preloadedAboutSupport, "=" .. fileName, "t", _G)
-            if chunk then
-                local success, execErr = pcall(chunk)
-                if not success then
-                    speakMsg("No internet connection. Please check your internet connection and try again later.")
-                    return
-                end
-            else
-                speakMsg("No internet connection. Please check your internet connection and try again later.")
-                return
+-- ==================== کلپ بورڈ مانیٹرنگ ====================
+local function getClipText()
+    if not ctx then return nil end
+    local manager = ctx.getSystemService(Context.CLIPBOARD_SERVICE)
+    if manager and manager.hasPrimaryClip() then
+        local clip = manager.getPrimaryClip()
+        if clip and clip.getItemCount() > 0 then
+            local item = clip.getItemAt(0)
+            if item and item.getText() then 
+                return tostring(item.getText())
             end
-            return
+        end
+    end
+    return nil
+end
+
+-- ==================== مزید کلپ بورڈ ڈیٹا لوڈ کریں ====================
+local function loadMoreClipboardData(reset)
+    if reset then
+        currentOffset = 0
+        mainAdapter.clear()
+    end
+    
+    local startIndex = currentOffset + 1
+    local endIndex = math.min(currentOffset + ITEMS_PER_PAGE, #allClipboardData)
+    
+    if startIndex <= endIndex then
+        for i = startIndex, endIndex do
+            if allClipboardData[i] then
+                mainAdapter.add(allClipboardData[i])
+            end
         end
     end
     
-    local loadingDialog = LuaDialog(service)
-    loadingDialog.setTitle("Loading...")
-    loadingDialog.setMessage("Fetching " .. optionTitle .. " from server...")
-    loadingDialog.setCancelable(false)
-    loadingDialog.show()
+    currentOffset = endIndex
+    local hasMoreItems = (currentOffset < #allClipboardData)
+    
+    if hasMoreItems then
+        btnLoadMore.setVisibility(View.VISIBLE)
+    else
+        btnLoadMore.setVisibility(View.GONE)
+    end
+    
+    mainAdapter.notifyDataSetChanged()
+end
 
-    Http.get(BASE_URL .. fileName, function(code, response)
-        Handler(Looper.getMainLooper()).post(Runnable{
-            run=function()
-                loadingDialog.dismiss()
-                if code == 200 and response and trim(response) ~= "" then
-                    local finalResponse = response
-                    if optionTitle == "About & Support" then
-                        finalResponse = "local descriptionText = [[" .. cachedDescription:gsub("%]", "] ]") .. "]]\n\n" .. response
+-- ==================== تمام ڈیٹا کیش لوڈ کریں ====================
+local function loadAllDataToCache()
+    task(function(dbFile)
+        require "import"
+        import "android.database.sqlite.SQLiteDatabase"
+        local clipData = {}
+        local favData = {}
+        
+        local d = SQLiteDatabase.openOrCreateDatabase(dbFile, nil)
+        local cursor = d.rawQuery("SELECT content FROM clipboard_history ORDER BY id DESC", nil)
+        if cursor and cursor.getCount() > 0 then
+            cursor.moveToFirst()
+            while not cursor.isAfterLast() do
+                if not cursor.isNull(0) then
+                    local content = cursor.getString(0)
+                    if content and content ~= "" then
+                        table.insert(clipData, tostring(content))
                     end
-                    
-                    local chunk, err = load(finalResponse, "=" .. fileName, "t", _G)
-                    if chunk then
-                        local success, execErr = pcall(chunk)
-                        if not success then
-                            speakMsg("No internet connection. Please check your internet connection and try again later.")
-                            return
+                end
+                cursor.moveToNext()
+            end
+        end
+        if cursor then cursor.close() end
+        
+        cursor = d.rawQuery("SELECT content FROM favorite_history ORDER BY id DESC", nil)
+        if cursor and cursor.getCount() > 0 then
+            cursor.moveToFirst()
+            while not cursor.isAfterLast() do
+                if not cursor.isNull(0) then
+                    local content = cursor.getString(0)
+                    if content and content ~= "" then
+                        table.insert(favData, tostring(content))
+                    end
+                end
+                cursor.moveToNext()
+            end
+        end
+        if cursor then cursor.close() end
+        
+        d.close()
+        return {clip = clipData, fav = favData}
+    end, dbFile, function(data)
+        allClipboardData = {}
+        allFavoriteData = {}
+        
+        if data and data.clip then
+            for i = 1, #data.clip do
+                local text = data.clip[i]
+                if text then
+                    table.insert(allClipboardData, {text_item = text})
+                end
+            end
+        end
+        
+        if data and data.fav then
+            for i = 1, #data.fav do
+                local text = data.fav[i]
+                if text then
+                    table.insert(allFavoriteData, {text_item = text})
+                end
+            end
+        end
+        
+        if #allClipboardData > 0 then
+            loadMoreClipboardData(true)
+        end
+    end)
+end
+
+-- ==================== ڈیٹا بیس آپریشنز ====================
+function saveToDB(text, tableName)
+    if not text or text == "" then return end
+    task(function(dbPath, text, tableName)
+        require "import"
+        import "android.database.sqlite.SQLiteDatabase"
+        import "android.content.ContentValues"
+        local d = SQLiteDatabase.openOrCreateDatabase(dbPath, nil)
+        d.delete(tableName, "content=?", {text})
+        local values = ContentValues()
+        values.put("content", text)
+        d.insert(tableName, nil, values)
+        d.close()
+        return true
+    end, dbFile, text, tableName, function()
+        loadAllDataToCache()
+    end)
+end
+
+function deleteFromDB(text, tableName)
+    task(function(dbPath, text, tableName)
+        require "import"
+        import "android.database.sqlite.SQLiteDatabase"
+        local d = SQLiteDatabase.openOrCreateDatabase(dbPath, nil)
+        d.delete(tableName, "content=?", {text})
+        d.close()
+        return true
+    end, dbFile, text, tableName, function()
+        loadAllDataToCache()
+    end)
+end
+
+-- ==================== سرچ فنکشن ====================
+local function searchInCache(cache, keyword, adapter, isFavorite)
+    adapter.clear()
+    if keyword == nil or keyword == "" then
+        if not isFavorite then
+            if #allClipboardData > 0 then
+                loadMoreClipboardData(true)
+            end
+        end
+    else
+        local searchKey = string.lower(keyword)
+        local tempItems = {}
+        local dataToSearch = isFavorite and allFavoriteData or allClipboardData
+        
+        for i = 1, #dataToSearch do
+            local item = dataToSearch[i]
+            if item and item.text_item and string.find(string.lower(item.text_item), searchKey, 1, true) then
+                table.insert(tempItems, item)
+            end
+        end
+        
+        for i = 1, #tempItems do
+            adapter.add(tempItems[i])
+        end
+    end
+    adapter.notifyDataSetChanged()
+end
+
+-- ==================== یوزر پروفائل ڈائیلاگ ====================
+local function showProfileDialog()
+    if not ctx then return end
+    
+    -- پہلے چیک کریں کہ یوزر لاگ ان ہے یا نہیں
+    local name, email = getUserInfo()
+    
+    if not name then
+        -- لاگ ان نہیں، لاگ ان ڈائیلاگ دکھائیں
+        showLoginDialog()
+        return
+    end
+    
+    -- لاگ ان ہے، پروفائل ڈائیلاگ دکھائیں
+    local profileLayout = {
+        LinearLayout,
+        orientation = "vertical",
+        padding = "20dp",
+        layout_width = "match_parent",
+        {
+            TextView,
+            text = "User Profile",
+            textSize = "20sp",
+            textColor = "#2196F3",
+            gravity = "center",
+            layout_marginBottom = "20dp"
+        },
+        {
+            TextView,
+            id = "profileName",
+            text = "Name: " .. (name or "Unknown"),
+            textSize = "16sp",
+            textColor = "#212121",
+            layout_marginBottom = "10dp",
+            typeface = Typeface.DEFAULT_BOLD
+        },
+        {
+            TextView,
+            id = "profileEmail",
+            text = "Email: " .. (email or "Not provided"),
+            textSize = "14sp",
+            layout_marginBottom = "20dp"
+        },
+        {
+            Button,
+            id = "btnLogout",
+            text = "LOGOUT",
+            layout_width = "match_parent",
+            backgroundColor = "#F44336",
+            textColor = "#FFFFFF",
+            layout_marginBottom = "10dp"
+        },
+        {
+            Button,
+            id = "btnDeleteAccount",
+            text = "DELETE ACCOUNT PERMANENTLY",
+            layout_width = "match_parent",
+            backgroundColor = "#000000",
+            textColor = "#FFFFFF"
+        },
+        {
+            Button,
+            id = "btnProfileClose",
+            text = "CLOSE",
+            layout_width = "match_parent",
+            backgroundColor = "#2196F3",
+            textColor = "#FFFFFF",
+            layout_marginTop = "10dp"
+        }
+    }
+    
+    local profileDialog = LuaDialog(ctx)
+    profileDialog.setTitle("Profile Settings")
+    profileDialog.setView(loadlayout(profileLayout))
+    
+    btnLogout.onClick = function()
+        local builder = AlertDialog.Builder(ctx)
+        builder.setTitle("Confirm Logout")
+        builder.setMessage("Are you sure you want to logout?")
+        builder.setPositiveButton("Yes", function()
+            logout()
+            profileDialog.dismiss()
+        end)
+        builder.setNegativeButton("No", nil)
+        builder.show()
+    end
+    
+    btnDeleteAccount.onClick = function()
+        local builder = AlertDialog.Builder(ctx)
+        builder.setTitle("Delete Account")
+        builder.setMessage("This will permanently delete all your data. This action cannot be undone. Continue?")
+        builder.setPositiveButton("DELETE", function()
+            local d = SQLiteDatabase.openOrCreateDatabase(dbFile, nil)
+            d.delete("user_info", nil, nil)
+            d.delete("access_tokens", nil, nil)
+            d.close()
+            
+            Toast.makeText(ctx, "Account deleted", Toast.LENGTH_SHORT).show()
+            if btnUser then btnUser.setText("USER NAME") end
+            profileDialog.dismiss()
+        end)
+        builder.setNegativeButton("Cancel", nil)
+        builder.show()
+    end
+    
+    btnProfileClose.onClick = function()
+        profileDialog.dismiss()
+    end
+    
+    profileDialog.show()
+end
+
+-- ==================== ایڈٹ ڈائیلاگ ====================
+local function showEditDialog(itemText, position, isFavorite, adapter, listView, cache)
+    if not ctx then return end
+    
+    local editLayout = {
+        LinearLayout,
+        orientation = "vertical",
+        padding = "20dp",
+        layout_width = "match_parent",
+        {
+            EditText,
+            id = "etEdit",
+            text = itemText,
+            layout_width = "match_parent",
+            layout_marginBottom = "15dp"
+        },
+        {
+            LinearLayout,
+            orientation = "horizontal",
+            layout_width = "match_parent",
+            gravity = "center",
+            {
+                Button,
+                text = "CANCEL",
+                id = "btnCancel",
+                layout_weight = 1,
+                layout_marginRight = "5dp",
+                backgroundColor = "#9E9E9E",
+                textColor = "#FFFFFF"
+            },
+            {
+                Button,
+                text = "OK",
+                id = "btnOk",
+                layout_weight = 1,
+                layout_marginLeft = "5dp",
+                backgroundColor = "#2196F3",
+                textColor = "#FFFFFF"
+            }
+        }
+    }
+    
+    local editDialog = LuaDialog(ctx)
+    editDialog.setTitle("Edit")
+    editDialog.setView(loadlayout(editLayout))
+    
+    btnCancel.onClick = function()
+        editDialog.dismiss()
+    end
+    
+    btnOk.onClick = function()
+        local newText = etEdit.getText()
+        if newText then
+            newText = tostring(newText)
+            if newText ~= "" and newText ~= itemText then
+                local tableName = isFavorite and "favorite_history" or "clipboard_history"
+                
+                deleteFromDB(itemText, tableName)
+                saveToDB(newText, tableName)
+                
+                if isFavorite then
+                    for i = 1, #allFavoriteData do
+                        if allFavoriteData[i] and allFavoriteData[i].text_item == itemText then
+                            allFavoriteData[i].text_item = newText
+                            break
                         end
-                    else
-                        speakMsg("No internet connection. Please check your internet connection and try again later.")
-                        return
                     end
                 else
-                    speakMsg("No internet connection. Please check your internet connection and try again later.")
-                    return
+                    for i = 1, #allClipboardData do
+                        if allClipboardData[i] and allClipboardData[i].text_item == itemText then
+                            allClipboardData[i].text_item = newText
+                            break
+                        end
+                    end
+                end
+                
+                if not isFavorite then
+                    if #allClipboardData > 0 then
+                        loadMoreClipboardData(true)
+                    end
+                end
+                
+                if listView then listView.setSelection(0) end
+            end
+        end
+        editDialog.dismiss()
+    end
+    
+    editDialog.show()
+end
+
+-- ==================== مزید فیورٹ ڈیٹا لوڈ کریں ====================
+local function loadMoreFavoriteData(adapter, reset)
+    if reset then
+        favCurrentOffset = 0
+        adapter.clear()
+    end
+    
+    local startIndex = favCurrentOffset + 1
+    local endIndex = math.min(favCurrentOffset + ITEMS_PER_PAGE, #allFavoriteData)
+    
+    if startIndex <= endIndex then
+        for i = startIndex, endIndex do
+            if allFavoriteData[i] then
+                adapter.add(allFavoriteData[i])
+            end
+        end
+    end
+    
+    favCurrentOffset = endIndex
+    local favHasMoreItems = (favCurrentOffset < #allFavoriteData)
+    
+    return favHasMoreItems
+end
+
+-- ==================== فیورٹ ڈائیلاگ ====================
+local function showFavoritesDialog()
+    if not ctx then return end
+    
+    local favDialog = LuaDialog(ctx)
+    favDialog.setTitle("Favorites")
+    
+    local favLayout = {
+        LinearLayout,
+        orientation = "vertical",
+        padding = "10dp",
+        layout_width = "match_parent",
+        layout_height = "match_parent",
+        {
+            EditText,
+            id = "favEtSearch",
+            hint = "Type to search...",
+            layout_width = "match_parent",
+            layout_height = "wrap_content",
+            visibility = "gone",
+            backgroundColor = "#FFFFFF",
+            padding = "10dp",
+            textSize = "16sp",
+            singleLine = true
+        },
+        {
+            Button,
+            id = "favBtnKeyword",
+            text = "ENTER KEYWORD",
+            layout_width = "match_parent",
+            layout_height = "wrap_content",
+            layout_marginBottom = "5dp",
+            backgroundColor = "#2196F3",
+            textColor = "#FFFFFF",
+            textSize = "16sp"
+        },
+        {
+            ListView,
+            id = "favLvClipboard",
+            layout_width = "match_parent",
+            layout_height = "0dp",
+            layout_weight = 1,
+            layout_marginTop = "5dp",
+            layout_marginBottom = "5dp",
+            dividerHeight = "1dp",
+            backgroundColor = "#F5F5F5"
+        },
+        {
+            Button,
+            id = "favBtnLoadMore",
+            text = "LOAD MORE ITEMS",
+            layout_width = "match_parent",
+            layout_height = "wrap_content",
+            backgroundColor = "#4CAF50",
+            textColor = "#FFFFFF",
+            textSize = "14sp",
+            visibility = "gone",
+            layout_marginBottom = "5dp"
+        },
+        {
+            Button,
+            id = "favBtnSearchCancel",
+            text = "CANCEL",
+            layout_width = "match_parent",
+            layout_height = "wrap_content",
+            visibility = "gone",
+            backgroundColor = "#F44336",
+            textColor = "#FFFFFF",
+            textSize = "14sp",
+            layout_marginBottom = "5dp"
+        },
+        {
+            LinearLayout,
+            id = "favButtonsContainer",
+            layout_width = "match_parent",
+            layout_height = "wrap_content",
+            orientation = "horizontal",
+            gravity = "center",
+            {
+                Button,
+                text = "MANAGE",
+                id = "favBtnManage",
+                layout_weight = 1,
+                layout_height = "wrap_content",
+                layout_marginRight = "2dp",
+                backgroundColor = "#4CAF50",
+                textColor = "#FFFFFF",
+                textSize = "14sp"
+            },
+            {
+                Button,
+                text = "EXIT",
+                id = "favBtnExit",
+                layout_weight = 1,
+                layout_height = "wrap_content",
+                layout_marginLeft = "2dp",
+                layout_marginRight = "2dp",
+                backgroundColor = "#F44336",
+                textColor = "#FFFFFF",
+                textSize = "14sp"
+            },
+            {
+                Button,
+                text = "NEW",
+                id = "favBtnNew",
+                layout_weight = 1,
+                layout_height = "wrap_content",
+                layout_marginLeft = "2dp",
+                backgroundColor = "#FF9800",
+                textColor = "#FFFFFF",
+                textSize = "14sp"
+            }
+        }
+    }
+    
+    favDialog.setView(loadlayout(favLayout))
+    
+    local favAdapter = LuaAdapter(ctx, {}, item_layout)
+    favLvClipboard.setAdapter(favAdapter)
+    
+    local function loadMoreFavorites(reset)
+        if reset then
+            favCurrentOffset = 0
+            favAdapter.clear()
+        end
+        
+        local startIndex = favCurrentOffset + 1
+        local endIndex = math.min(favCurrentOffset + ITEMS_PER_PAGE, #allFavoriteData)
+        
+        if startIndex <= endIndex then
+            for i = startIndex, endIndex do
+                if allFavoriteData[i] then
+                    favAdapter.add(allFavoriteData[i])
                 end
             end
-        })
-    end)
-end
-
-local function createServerButtonHandler(optionTitle)
-    return function()
-        local fileName = SERVER_FILES[optionTitle]
-        if fileName then
-            loadAndExecuteFromServer(fileName, optionTitle)
+        end
+        
+        favCurrentOffset = endIndex
+        local favHasMoreItems = (favCurrentOffset < #allFavoriteData)
+        
+        if favHasMoreItems then
+            favBtnLoadMore.setVisibility(View.VISIBLE)
         else
-            showMsg("No server file configured for: " .. optionTitle)
+            favBtnLoadMore.setVisibility(View.GONE)
         end
     end
-end
-
-Thread(luajava.bindClass("java.lang.Runnable"){
-    run = function()
-        Http.get(DESCRIPTION_URL, function(code, response)
-            if code == 200 and response and trim(response) ~= "" then
-                cachedDescription = response
-            end
-        end)
-    end
-}).start()
-
-preloadAboutSupport()
-
-local function showTextInputDialog(hint, callback)
-    local inputLayout = LinearLayout(service)
-    inputLayout.setOrientation(1)
-    inputLayout.setPadding(40, 40, 40, 40)
-    local title = TextView(service)
-    title.setText(hint)
-    title.setTextSize(16)
-    title.setGravity(Gravity.CENTER)
-    title.setPadding(0, 0, 0, 20)
-    inputLayout.addView(title)
-    local textBox = EditText(service)
-    textBox.setHint("Type here...")
-    textBox.setGravity(Gravity.TOP)
-    textBox.setLayoutParams(LinearLayout.LayoutParams(-1, 200))
-    inputLayout.addView(textBox)
-    local btnLayout = LinearLayout(service)
-    btnLayout.setOrientation(0)
-    btnLayout.setLayoutParams(LinearLayout.LayoutParams(-1, -2))
-    local okBtn = Button(service)
-    okBtn.setText("OK")
-    okBtn.setBackgroundColor(0xFF2E7D32)
-    okBtn.setTextColor(0xFFFFFFFF)
-    local okParams = LinearLayout.LayoutParams(0, -2, 1)
-    okParams.setMargins(0, 10, 5, 0)
-    okBtn.setLayoutParams(okParams)
-    btnLayout.addView(okBtn)
-    local cancelBtn = Button(service)
-    cancelBtn.setText("CANCEL")
-    cancelBtn.setBackgroundColor(0xFF9E9E9E)
-    cancelBtn.setTextColor(0xFFFFFFFF)
-    local cancelParams = LinearLayout.LayoutParams(0, -2, 1)
-    cancelParams.setMargins(5, 10, 0, 0)
-    cancelBtn.setLayoutParams(cancelParams)
-    btnLayout.addView(cancelBtn)
-    inputLayout.addView(btnLayout)
-    local inputDialog = AlertDialog.Builder(service)
-    inputDialog.setTitle("Enter Text")
-    inputDialog.setView(inputLayout)
-    local dlg = inputDialog.create()
-    dlg.getWindow().setType(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY)
-    cancelBtn.onClick = function()
-        dlg.dismiss()
-    end
-    okBtn.onClick = function()
-        local text = textBox.getText().toString()
-        dlg.dismiss()
-        if text ~= "" then
-            callback(text)
-        end
-    end
-    dlg.show()
-end
-
-local scrollView = ScrollView(service)
-scrollView.setLayoutParams(LinearLayout.LayoutParams(-1, -1))
-
-local layout = LinearLayout(service)
-layout.setOrientation(1)
-layout.setPadding(40, 40, 40, 40)
-layout.setBackgroundColor(0xFFFFFFFF)
-
-local titleText = TextView(service)
-titleText.setText("Auto Update Injector By Tech For V I")
-titleText.setTextSize(20)
-titleText.setGravity(Gravity.CENTER)
-titleText.setTextColor(0xFF2E7D32)
-layout.addView(titleText)
-
-local devText = TextView(service)
-devText.setText("Developer: Sabir Jamil")
-devText.setTextSize(14)
-devText.setGravity(Gravity.CENTER)
-devText.setPadding(0, 0, 0, 20)
-layout.addView(devText)
-
-local row1 = LinearLayout(service)
-row1.setOrientation(0)
-row1.setLayoutParams(LinearLayout.LayoutParams(-1, -2))
-
-local mainLuaEdit = EditText(service)
-mainLuaEdit.setHint("Main Lua Direct Link...")
-mainLuaEdit.setPadding(20, 20, 20, 20)
-local editParams = LinearLayout.LayoutParams(0, -2, 1)
-editParams.setMargins(0, 10, 5, 10)
-mainLuaEdit.setLayoutParams(editParams)
-row1.addView(mainLuaEdit)
-
-local versionCheckEdit = EditText(service)
-versionCheckEdit.setHint("Version Check Direct Link...")
-versionCheckEdit.setPadding(20, 20, 20, 20)
-versionCheckEdit.setLayoutParams(editParams)
-row1.addView(versionCheckEdit)
-
-local versionNumEdit = EditText(service)
-versionNumEdit.setHint("Version Number (e.g. 1.0)")
-versionNumEdit.setPadding(20, 20, 20, 20)
-versionNumEdit.setLayoutParams(editParams)
-row1.addView(versionNumEdit)
-
-layout.addView(row1)
-
-local row1_5 = LinearLayout(service)
-row1_5.setOrientation(0)
-row1_5.setLayoutParams(LinearLayout.LayoutParams(-1, -2))
-
-local newFeaturesEdit = EditText(service)
-newFeaturesEdit.setHint("New Features File Direct Link (Optional)")
-newFeaturesEdit.setPadding(20, 20, 20, 20)
-newFeaturesEdit.setLayoutParams(editParams)
-row1_5.addView(newFeaturesEdit)
-
-layout.addView(row1_5)
-
-local row1_6 = LinearLayout(service)
-row1_6.setOrientation(0)
-row1_6.setLayoutParams(LinearLayout.LayoutParams(-1, -2))
-row1_6.setGravity(Gravity.CENTER_VERTICAL)
-
-local soundLabel = TextView(service)
-soundLabel.setText("Sound:")
-soundLabel.setTextSize(13)
-soundLabel.setTextColor(0xFF333333)
-soundLabel.setPadding(5, 0, 10, 0)
-row1_6.addView(soundLabel)
-
-local soundSwitch = CheckBox(service)
-soundSwitch.setText("")
-soundSwitch.setChecked(true)
-soundSwitch.setPadding(0, 10, 30, 10)
-row1_6.addView(soundSwitch)
-
-local vibrationLabel = TextView(service)
-vibrationLabel.setText("Vibration:")
-vibrationLabel.setTextSize(13)
-vibrationLabel.setTextColor(0xFF333333)
-vibrationLabel.setPadding(5, 0, 10, 0)
-row1_6.addView(vibrationLabel)
-
-local vibrationSwitch = CheckBox(service)
-vibrationSwitch.setText("")
-vibrationSwitch.setChecked(true)
-vibrationSwitch.setPadding(0, 10, 0, 10)
-row1_6.addView(vibrationSwitch)
-
-layout.addView(row1_6)
-
-local row2 = LinearLayout(service)
-row2.setOrientation(0)
-row2.setLayoutParams(LinearLayout.LayoutParams(-1, -2))
-
-local typeSpinner = Spinner(service)
-local typeAdapter = ArrayAdapter(service, android.R.layout.simple_spinner_item, {"Extension", "Tool"})
-typeAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
-typeSpinner.setAdapter(typeAdapter)
-local spinnerParams = LinearLayout.LayoutParams(0, -2, 1)
-spinnerParams.setMargins(0, 10, 5, 10)
-typeSpinner.setLayoutParams(spinnerParams)
-row2.addView(typeSpinner)
-
-local statusSpinner = TextView(service)
-statusSpinner.setText("Click to Select Folder...")
-statusSpinner.setTextSize(16)
-statusSpinner.setPadding(20, 20, 20, 20)
-statusSpinner.setGravity(Gravity.CENTER_VERTICAL)
-local gd = GradientDrawable()
-gd.setColor(0xFFF0F0F0)
-gd.setCornerRadius(10)
-gd.setStroke(2, 0xFFCCCCCC)
-statusSpinner.setBackgroundDrawable(gd)
-statusSpinner.setLayoutParams(spinnerParams)
-row2.addView(statusSpinner)
-
-layout.addView(row2)
-
-local selectedFolder = ""
-local fullFolderList = {}
-
-local function openFullSearchDialog(targetPath, typeName)
-    local sLayout = LinearLayout(service)
-    sLayout.setOrientation(1)
-    sLayout.setPadding(30, 30, 30, 30)
-    local searchEdit = EditText(service)
-    searchEdit.setHint("Search " .. typeName .. "...")
-    sLayout.addView(searchEdit)
-    local lv = ListView(service)
-    local adapter = ArrayAdapter(service, android.R.layout.simple_list_item_1, fullFolderList)
-    lv.setAdapter(adapter)
-    lv.setLayoutParams(LinearLayout.LayoutParams(-1, 0, 1))
-    sLayout.addView(lv)
-    local sDlg = AlertDialog.Builder(service).setTitle("Choose " .. typeName).setView(sLayout).setNegativeButton("GO BACK", nil).create()
-    sDlg.getWindow().setType(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY)
-    searchEdit.addTextChangedListener(TextWatcher{onTextChanged=function(s) adapter.getFilter().filter(tostring(s)) end})
-    lv.onItemClick = function(l, v, p, i)
-        selectedFolder = tostring(v.Text)
-        statusSpinner.setText("Current: " .. selectedFolder)
-        sDlg.dismiss()
-    end
-    sDlg.show()
-end
-
-local function scanFolders(targetPath)
-    fullFolderList = {}
-    local folderObj = File(targetPath)
-    if folderObj.exists() and folderObj.isDirectory() then
-        local files = folderObj.listFiles()
-        if files then
-            for i = 0, #files - 1 do
-                if files[i].isDirectory() then table.insert(fullFolderList, files[i].getName()) end
-            end
-        end
-    end
-    table.sort(fullFolderList)
-    if #fullFolderList > 0 then
-        statusSpinner.setText("Current: " .. fullFolderList[1])
-        selectedFolder = fullFolderList[1]
-    else
-        statusSpinner.setText("Click to Select Folder...")
-        selectedFolder = ""
-    end
-end
-
-typeSpinner.onItemSelected = function(parent, view, position, id)
-    scanFolders(parent.getItemAtPosition(position) == "Extension" and EXT_PATH or TOOL_PATH)
-end
-
-statusSpinner.onClick = function()
-    openFullSearchDialog((typeSpinner.getSelectedItem() == "Extension" and EXT_PATH or TOOL_PATH), typeSpinner.getSelectedItem())
-end
-
-local row3 = LinearLayout(service)
-row3.setOrientation(0)
-row3.setLayoutParams(LinearLayout.LayoutParams(-1, -2))
-
-local generateBtn = Button(service)
-generateBtn.setText("GENERATE AUTO UPDATE")
-generateBtn.setBackgroundColor(0xFF2E7D32)
-generateBtn.setTextColor(0xFFFFFFFF)
-local btnParams = LinearLayout.LayoutParams(0, -2, 1)
-btnParams.setMargins(0, 10, 5, 10)
-generateBtn.setLayoutParams(btnParams)
-row3.addView(generateBtn)
-
-local aboutBtn = Button(service)
-aboutBtn.setText("ABOUT & SUPPORT")
-aboutBtn.setBackgroundColor(0xFF2196F3)
-aboutBtn.setTextColor(0xFFFFFFFF)
-aboutBtn.setLayoutParams(btnParams)
-row3.addView(aboutBtn)
-
-local exitBtn = Button(service)
-exitBtn.setText("EXIT")
-exitBtn.setBackgroundColor(0xFF9E9E9E)
-exitBtn.setTextColor(0xFFFFFFFF)
-exitBtn.setLayoutParams(btnParams)
-row3.addView(exitBtn)
-
-layout.addView(row3)
-
-scrollView.addView(layout)
-
-_G.mainDlg = AlertDialog.Builder(service).setView(scrollView).create()
-_G.mainDlg.getWindow().setType(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY)
-_G.mainDialog = _G.mainDlg
-_G.mainDlg.show()
-
-local function generateAutoUpdate()
-    if selectedFolder == "" then
-        showMsg("Error: Select folder first!")
-        return
+    
+    if allFavoriteData and #allFavoriteData > 0 then
+        loadMoreFavorites(true)
     end
     
-    local userMainLink = tostring(mainLuaEdit.getText())
-    local userVersionLink = tostring(versionCheckEdit.getText())
-    local userVersionNum = tostring(versionNumEdit.getText())
-    local userNewFeaturesLink = tostring(newFeaturesEdit.getText())
-    
-    if userMainLink == "" or userMainLink == "nil" or userVersionLink == "" or userVersionNum == "" then
-        showMsg("Error: All required fields are required! (Main Lua Link, Version Check Link, Version Number)")
-        return
+    favBtnLoadMore.onClick = function()
+        loadMoreFavorites(false)
     end
     
-    local convertedMainLink = convertToRawUrl(userMainLink)
-    local convertedVersionLink = convertToRawUrl(userVersionLink)
-    local convertedNewFeaturesLink = ""
-    if userNewFeaturesLink ~= "" and userNewFeaturesLink ~= "nil" then
-        convertedNewFeaturesLink = convertToRawUrl(userNewFeaturesLink)
+    local favSearchHandler = Handler()
+    local favSearchRunnable = nil
+    
+    favBtnKeyword.onClick = function()
+        favBtnKeyword.setVisibility(8)
+        favButtonsContainer.setVisibility(8)
+        favEtSearch.setVisibility(0)
+        favBtnSearchCancel.setVisibility(0)
+        favBtnLoadMore.setVisibility(8)
+        favEtSearch.requestFocus()
+        
+        local imm = ctx.getSystemService(Context.INPUT_METHOD_SERVICE)
+        imm.toggleSoftInput(InputMethodManager.SHOW_FORCED, 0)
     end
     
-    local soundEnabled = soundSwitch.isChecked()
-    local vibrationEnabled = vibrationSwitch.isChecked()
-    
-    local category = typeSpinner.getSelectedItem()
-    local folderPath = (category == "Extension" and EXT_PATH or TOOL_PATH) .. selectedFolder
-    local mainFilePath = folderPath .. "/main.lua"
-    local oldFilePath = folderPath .. "/old_main.lua"
-    local versionFilePath = folderPath .. "/version.txt"
-    
-    local mainFile = File(mainFilePath)
-    local oldFile = File(oldFilePath)
-    
-    if not mainFile.exists() then
-        showMsg("Error: main.lua not found!")
-        return
-    end
-
-    if not oldFile.exists() then
-        if not mainFile.renameTo(oldFile) then
-            showMsg("Error: Could not create backup!")
-            return
-        end
-    end
-
-    local vf = io.open(versionFilePath, "w")
-    if vf then
-        vf:write(userVersionNum)
-        vf:close()
-    end
-
-    local notificationFunc = ""
-    if soundEnabled and vibrationEnabled then
-        notificationFunc = [[
-local function playNotification()
-    local tone = ToneGenerator(AudioManager.STREAM_NOTIFICATION, 100)
-    tone.startTone(ToneGenerator.TONE_PROP_ACK, 100)
-    local vibrator = (service or activity).getSystemService(Context.VIBRATOR_SERVICE)
-    if vibrator then
-        if Build.VERSION.SDK_INT >= 26 then
-            vibrator.vibrate(VibrationEffect.createOneShot(200, VibrationEffect.DEFAULT_AMPLITUDE))
-        else
-            vibrator.vibrate(200)
-        end
-    end
-end
-]]
-    elseif soundEnabled then
-        notificationFunc = [[
-local function playNotification()
-    local tone = ToneGenerator(AudioManager.STREAM_NOTIFICATION, 100)
-    tone.startTone(ToneGenerator.TONE_PROP_ACK, 100)
-end
-]]
-    elseif vibrationEnabled then
-        notificationFunc = [[
-local function playNotification()
-    local vibrator = (service or activity).getSystemService(Context.VIBRATOR_SERVICE)
-    if vibrator then
-        if Build.VERSION.SDK_INT >= 26 then
-            vibrator.vibrate(VibrationEffect.createOneShot(200, VibrationEffect.DEFAULT_AMPLITUDE))
-        else
-            vibrator.vibrate(200)
-        end
-    end
-end
-]]
-    else
-        notificationFunc = [[
-local function playNotification()
-    -- Notifications disabled by user
-end
-]]
-    end
-
-    local autoUpdateCode = [[
-require "import"
-import "android.*"
-import "com.androlua.Http"
-import "android.widget.Toast"
-import "android.app.AlertDialog"
-import "android.view.WindowManager"
-import "android.os.Handler"
-import "android.os.Looper"
-import "java.io.File"
-import "android.content.Context"
-import "android.media.ToneGenerator"
-import "android.media.AudioManager"
-import "android.os.Vibrator"
-import "android.os.Build"
-import "android.os.VibrationEffect"
-import "java.lang.Thread"
-
-local updateURL = "]] .. convertedVersionLink .. [["
-local downloadURL = "]] .. convertedMainLink .. [["
-local newFeaturesURL = "]] .. convertedNewFeaturesLink .. [["
-local defaultVersion = "]] .. userVersionNum .. [["
-local currentDir = "]] .. folderPath .. [["
-local oldPath = currentDir .. "/old_main.lua"
-local mainPath = currentDir .. "/main.lua"
-local versionPath = currentDir .. "/version.txt"
-
-local updateInProgress = false
-local prefs = (service or activity).getApplicationContext().getSharedPreferences("AutoUpdatePrefs", Context.MODE_PRIVATE)
-
-]] .. notificationFunc .. [[
-
-local function trim(s)
-    if s == nil then return "" end
-    return tostring(s):gsub("^%s*(.-)%s*$", "%1")
-end
-
-local function getCurrentVersion()
-    local f = io.open(versionPath, "r")
-    if f then
-        local ver = f:read("*a")
-        f:close()
-        if ver then return trim(ver) end
-    end
-    return defaultVersion
-end
-
-local function runOriginalCode()
-    if File(oldPath).exists() then
-        local func, err = loadfile(oldPath)
-        if func then 
-            pcall(func)
-        end
-    end
-end
-
-local function restartPlugin()
-    pcall(function() service.execute("closeAllDialogs") end)
-    pcall(function() service.toHome() end)
-
-    package.loaded["main"] = nil 
-    
-    local currentFile = mainPath
-    if File(currentFile).exists() then
-        local func, err = loadfile(currentFile)
-        if func then
-            pcall(func)
-        else
-            Toast.makeText(service, "Load Error: " .. tostring(err), 0).show()
-        end
-    end
-end
-
-local function showNewFeaturesDialog(featuresText)
-    Handler(Looper.getMainLooper()).post(Runnable{
-        run=function()
-            playNotification()
-            
-            local featuresDialog = AlertDialog.Builder(service or activity)
-            featuresDialog.setTitle("New Update Details")
-            featuresDialog.setMessage(featuresText or "No new features information available.")
-            featuresDialog.setPositiveButton("OK", {onClick=function(v) v.dismiss() end})
-            local dlg = featuresDialog.create()
-            dlg.getWindow().setType(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY)
-            dlg.setCancelable(false)
-            dlg.show()
+    favEtSearch.addTextChangedListener({
+        onTextChanged = function(s)
+            if favSearchRunnable then favSearchHandler.removeCallbacks(favSearchRunnable) end
+            favSearchRunnable = Runnable({
+                run = function()
+                    searchInCache(allFavoriteData, tostring(s), favAdapter, true)
+                end
+            })
+            favSearchHandler.postDelayed(favSearchRunnable, 1000)
         end
     })
-end
-
--- FIXED: New checkAndShowNewFeatures function with proper Thread and timing
-local function checkAndShowNewFeatures(versionToCheck)
-    if newFeaturesURL == "" or newFeaturesURL == "nil" then return end
     
-    -- Use Thread to avoid UI hang
-    Thread(Runnable{
-        run = function()
-            local canShow = prefs.getBoolean("canShowFeatures", false)
-            
-            -- If flag is true, load features
-            if canShow then
-                Http.get(newFeaturesURL, function(code, content)
-                    if code == 200 and content and trim(content) ~= "" then
-                        Handler(Looper.getMainLooper()).post(Runnable{
-                            run = function()
-                                showNewFeaturesDialog(content)
-                            end
-                        })
-                    end
-                    -- Reset flag after showing dialog or if file not found
-                    prefs.edit().putBoolean("canShowFeatures", false).putString("lastShownVersion", versionToCheck).apply()
-                end)
-            end
+    favBtnSearchCancel.onClick = function()
+        favEtSearch.setVisibility(8)
+        favBtnSearchCancel.setVisibility(8)
+        favBtnKeyword.setVisibility(0)
+        favButtonsContainer.setVisibility(0)
+        favEtSearch.setText("")
+        
+        loadMoreFavorites(true)
+        
+        local imm = ctx.getSystemService(Context.INPUT_METHOD_SERVICE)
+        imm.hideSoftInputFromWindow(favEtSearch.getWindowToken(), 0)
+    end
+    
+    favBtnManage.onClick = function()
+        if #allFavoriteData == 0 then
+            Toast.makeText(ctx, "Favorites list is empty", Toast.LENGTH_SHORT).show()
+            return
         end
-    }).start()
+        
+        local manageDialog = LuaDialog(ctx)
+        manageDialog.setTitle("Manage Favorites")
+        manageDialog.setMessage("Clear all favorites?")
+        manageDialog.setPositiveButton("Clear All", function()
+            task(function(dbPath)
+                require "import"
+                import "android.database.sqlite.SQLiteDatabase"
+                local d = SQLiteDatabase.openOrCreateDatabase(dbPath, nil)
+                d.delete("favorite_history", nil, nil)
+                d.close()
+                return true
+            end, dbFile, function()
+                loadAllDataToCache()
+            end)
+            
+            Toast.makeText(ctx, "All favorites cleared", Toast.LENGTH_SHORT).show()
+        end)
+        manageDialog.setNeutralButton("Cancel", nil)
+        manageDialog.show()
+    end
+    
+    favBtnNew.onClick = function()
+        local newLayout = {
+            LinearLayout,
+            orientation = "vertical",
+            padding = "20dp",
+            {
+                EditText,
+                id = "newFavEt",
+                hint = "Enter new favorite...",
+                layout_width = "match_parent"
+            }
+        }
+        
+        local newDialog = LuaDialog(ctx)
+        newDialog.setTitle("Add New Favorite")
+        newDialog.setView(loadlayout(newLayout))
+        newDialog.setPositiveButton("Add", function()
+            local newText = newFavEt.getText()
+            if newText then
+                newText = tostring(newText)
+                if newText ~= "" then
+                    saveToDB(newText, "favorite_history")
+                    
+                    local newItem = {text_item = newText}
+                    table.insert(allFavoriteData, 1, newItem)
+                    loadMoreFavorites(true)
+                    
+                    Toast.makeText(ctx, "Added to favorites", Toast.LENGTH_SHORT).show()
+                end
+            end
+            newDialog.dismiss()
+        end)
+        newDialog.setNegativeButton("Cancel", nil)
+        newDialog.show()
+    end
+    
+    favBtnExit.onClick = function()
+        favDialog.dismiss()
+    end
+    
+    favLvClipboard.onItemClick = function(l, v, p, i)
+        local item = favAdapter.getItem(p)
+        if item and item.text_item then
+            local text = tostring(item.text_item)
+            local manager = ctx.getSystemService(Context.CLIPBOARD_SERVICE)
+            manager.setPrimaryClip(ClipData.newPlainText("label", text))
+            Toast.makeText(ctx, "Copied: " .. text, Toast.LENGTH_SHORT).show()
+        end
+    end
+    
+    favLvClipboard.setOnItemLongClickListener(AdapterView.OnItemLongClickListener({
+        onItemLongClick = function(parent, view, position, id)
+            local item = favAdapter.getItem(position)
+            if not item or not item.text_item then return true end
+            local text = tostring(item.text_item)
+            
+            local popup = ListPopupWindow(ctx)
+            local options = {"Remove from favorites", "Edit", "Delete"}
+            local adapter = ArrayAdapter(ctx, android.R.layout.simple_list_item_1, options)
+            popup.setAdapter(adapter)
+            popup.setAnchorView(view)
+            popup.setWidth(400)
+            popup.setHeight(300)
+            popup.setModal(true)
+            
+            popup.setOnItemClickListener(AdapterView.OnItemClickListener({
+                onItemClick = function(p, v, pos, id)
+                    if pos == 0 then
+                        deleteFromDB(text, "favorite_history")
+                        
+                        for i = 1, #allFavoriteData do
+                            if allFavoriteData[i] and allFavoriteData[i].text_item == text then
+                                table.remove(allFavoriteData, i)
+                                break
+                            end
+                        end
+                        
+                        loadMoreFavorites(true)
+                        
+                    elseif pos == 1 then
+                        showEditDialog(text, position, true, favAdapter, favLvClipboard, allFavoriteData)
+                        
+                    elseif pos == 2 then
+                        local confirmDialog = LuaDialog(ctx)
+                        confirmDialog.setTitle("Delete " .. text)
+                        confirmDialog.setMessage("Delete this item?")
+                        confirmDialog.setPositiveButton("DELETE", function()
+                            deleteFromDB(text, "favorite_history")
+                            
+                            for i = 1, #allFavoriteData do
+                                if allFavoriteData[i] and allFavoriteData[i].text_item == text then
+                                    table.remove(allFavoriteData, i)
+                                    break
+                                end
+                            end
+                            
+                            loadMoreFavorites(true)
+                            
+                            Toast.makeText(ctx, "Deleted", Toast.LENGTH_SHORT).show()
+                        end)
+                        confirmDialog.setNegativeButton("CANCEL", nil)
+                        confirmDialog.show()
+                    end
+                    popup.dismiss()
+                end
+            }))
+            
+            popup.show()
+            return true
+        end
+    }))
+    
+    favDialog.show()
 end
 
-local function performUpdate(onlineVersion)
-    if updateInProgress then
-        Toast.makeText(service, "Update already in progress...", 0).show()
+-- ==================== ABOUT AND SUPPORT ڈائیلاگ ====================
+local function showAboutDialog()
+    if not ctx then return end
+    
+    local aboutLayout = {
+        LinearLayout,
+        orientation = "vertical",
+        padding = "20dp",
+        layout_width = "match_parent",
+        {
+            TextView,
+            text = "My Clipboard Manager",
+            textSize = "20sp",
+            textColor = "#2196F3",
+            layout_marginBottom = "10dp",
+            gravity = "center"
+        },
+        {
+            TextView,
+            text = "Version 2.0 (with Google Drive Backup)",
+            textSize = "14sp",
+            layout_marginBottom = "20dp",
+            gravity = "center"
+        },
+        {
+            TextView,
+            text = "Features:\n• Save clipboard history\n• Favorites\n• Search\n• Load More Items (1000 at a time)\n• Google Drive Backup",
+            textSize = "14sp",
+            layout_marginBottom = "20dp"
+        },
+        {
+            Button,
+            text = "CLOSE",
+            layout_width = "match_parent",
+            backgroundColor = "#2196F3",
+            textColor = "#FFFFFF",
+            onClick = function() aboutDialog.dismiss() end
+        }
+    }
+    
+    local aboutDialog = LuaDialog(ctx)
+    aboutDialog.setTitle("About & Support")
+    aboutDialog.setView(loadlayout(aboutLayout))
+    aboutDialog.show()
+end
+
+-- ==================== بیک اپ ڈائیلاگ ====================
+local function showBackupRestoreDialog()
+    if not ctx then return end
+    
+    -- پہلے چیک کریں کہ یوزر لاگ ان ہے یا نہیں
+    local name, email = getUserInfo()
+    
+    if not name then
+        -- لاگ ان نہیں، لاگ ان ڈائیلاگ دکھائیں
+        showLoginDialog()
         return
     end
     
-    updateInProgress = true
-    Toast.makeText(service, "Downloading update...", 0).show()
+    -- لاگ ان ہے، بیک اپ ڈائیلاگ دکھائیں
+    local backupLayout = {
+        LinearLayout,
+        orientation = "vertical",
+        padding = "20dp",
+        layout_width = "match_parent",
+        {
+            TextView,
+            text = "Google Drive Backup",
+            textSize = "18sp",
+            textColor = "#4CAF50",
+            gravity = "center",
+            layout_marginBottom = "20dp"
+        },
+        {
+            TextView,
+            id = "backupUserInfo",
+            text = "Connected as: " .. (name or "User"),
+            textSize = "14sp",
+            gravity = "center",
+            layout_marginBottom = "20dp"
+        },
+        {
+            Button,
+            id = "btnBackup",
+            text = "CREATE BACKUP",
+            layout_width = "match_parent",
+            backgroundColor = "#4CAF50",
+            textColor = "#FFFFFF",
+            layout_marginBottom = "10dp"
+        },
+        {
+            Button,
+            id = "btnRestore",
+            text = "RESTORE FROM BACKUP",
+            layout_width = "match_parent",
+            backgroundColor = "#FF9800",
+            textColor = "#FFFFFF",
+            layout_marginBottom = "10dp"
+        },
+        {
+            Button,
+            id = "btnBackupLogout",
+            text = "LOGOUT",
+            layout_width = "match_parent",
+            backgroundColor = "#F44336",
+            textColor = "#FFFFFF",
+            layout_marginBottom = "10dp"
+        },
+        {
+            Button,
+            text = "CANCEL",
+            layout_width = "match_parent",
+            backgroundColor = "#2196F3",
+            textColor = "#FFFFFF",
+            onClick = function() backupDialog.dismiss() end
+        }
+    }
     
-    Http.get(downloadURL, function(code, content)
-        if code == 200 and content then
-            local f = io.open(mainPath, "w")
-            if f then
-                f:write(content)
-                f:close()
-                
-                local vf = io.open(versionPath, "w")
-                if vf then
-                    vf:write(onlineVersion)
-                    vf:close()
-                end
-                
-                updateInProgress = false
-                
-                -- FIXED: Better pref settings for features dialog
-                prefs.edit()
-                    .putBoolean("canShowFeatures", true)
-                    .putString("lastShownVersion", "")
-                    .apply()
-                
-                Handler(Looper.getMainLooper()).post(Runnable{run=function()
-                    playNotification()
-                    
-                    local successDialog = AlertDialog.Builder(service or activity)
-                    successDialog.setTitle("Update Successful")
-                    successDialog.setMessage("Plugin updated to version " .. onlineVersion .. ".\n\nPlugin will restart automatically.")
-                    successDialog.setPositiveButton("OK", {onClick=function(v)
-                        v.dismiss()
-                        
-                        if _G.mainDlg then
-                            _G.mainDlg.hide()
-                        end
-                        
-                        Handler(Looper.getMainLooper()).postDelayed(Runnable{
-                            run = function()
-                                restartPlugin()
-                            end
-                        }, 500)
-                    end})
-                    local d2 = successDialog.create()
-                    d2.getWindow().setType(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY)
-                    d2.setCancelable(false)
-                    d2.show()
-                end})
-            else
-                updateInProgress = false
-                Toast.makeText(service, "Failed to write update", 0).show()
-            end
-        else
-            updateInProgress = false
-            Toast.makeText(service, "Failed to download update", 0).show()
-        end
-    end)
+    local backupDialog = LuaDialog(ctx)
+    backupDialog.setTitle("Backup Manager")
+    backupDialog.setView(loadlayout(backupLayout))
+    
+    if email then
+        backupUserInfo.setText("Connected as: " .. name .. "\n" .. email)
+    end
+    
+    btnBackup.onClick = function()
+        Toast.makeText(ctx, "Backup feature coming soon!", Toast.LENGTH_SHORT).show()
+    end
+    
+    btnRestore.onClick = function()
+        Toast.makeText(ctx, "Restore feature coming soon!", Toast.LENGTH_SHORT).show()
+    end
+    
+    btnBackupLogout.onClick = function()
+        local builder = AlertDialog.Builder(ctx)
+        builder.setTitle("Confirm Logout")
+        builder.setMessage("Are you sure you want to logout from Google Drive?")
+        builder.setPositiveButton("Yes", function()
+            logout()
+            backupDialog.dismiss()
+        end)
+        builder.setNegativeButton("No", nil)
+        builder.show()
+    end
+    
+    backupDialog.show()
 end
 
-local function checkUpdate()
-    Http.get(updateURL, function(code, response)
-        if code == 200 and response then
-            local onlineVersion = trim(response)
-            local currentVersion = getCurrentVersion()
-            
-            if onlineVersion ~= currentVersion then
-                Handler(Looper.getMainLooper()).post(Runnable{run=function()
-                    playNotification()
+-- ==================== مین سرچ ڈیباؤنس ====================
+local mainSearchHandler = Handler()
+local mainSearchRunnable = nil
+
+-- ==================== یوزر بٹن اپڈیٹ ====================
+local function updateUserButton()
+    local name, email = getUserInfo()
+    if name and btnUser then
+        btnUser.setText(name)
+    elseif btnUser then
+        btnUser.setText("USER NAME")
+    end
+end
+
+-- بٹنز کے onClick ایونٹس
+btnUser.onClick = function() showProfileDialog() end
+btnAbout.onClick = function() showAboutDialog() end
+btnBackupRestore.onClick = function() showBackupRestoreDialog() end
+btnFav.onClick = function() showFavoritesDialog() end
+
+dlg.show()
+loadAllDataToCache()
+updateUserButton()
+
+btnKeyword.onClick = function()
+    btnKeyword.setVisibility(8)
+    mainButtonsContainer.setVisibility(8)
+    mainEtSearch.setVisibility(0)
+    mainBtnSearchCancel.setVisibility(0)
+    btnLoadMore.setVisibility(8)
+    mainEtSearch.requestFocus()
+    local imm = ctx.getSystemService(Context.INPUT_METHOD_SERVICE)
+    imm.toggleSoftInput(InputMethodManager.SHOW_FORCED, 0)
+end
+
+mainEtSearch.addTextChangedListener({
+    onTextChanged = function(s)
+        if mainSearchRunnable then mainSearchHandler.removeCallbacks(mainSearchRunnable) end
+        mainSearchRunnable = Runnable({
+            run = function()
+                searchInCache(allClipboardData, tostring(s), mainAdapter, false)
+            end
+        })
+        mainSearchHandler.postDelayed(mainSearchRunnable, 1000)
+    end
+})
+
+mainBtnSearchCancel.onClick = function()
+    mainEtSearch.setVisibility(8)
+    mainBtnSearchCancel.setVisibility(8)
+    btnKeyword.setVisibility(0)
+    mainButtonsContainer.setVisibility(0)
+    mainEtSearch.setText("")
+    
+    if #allClipboardData > 0 then
+        loadMoreClipboardData(true)
+    end
+    
+    local imm = ctx.getSystemService(Context.INPUT_METHOD_SERVICE)
+    imm.hideSoftInputFromWindow(mainEtSearch.getWindowToken(), 0)
+end
+
+btnLoadMore.onClick = function()
+    loadMoreClipboardData(false)
+end
+
+-- مانیٹرنگ سسٹم
+local lastCheckedText = getClipText() or ""
+local isRunning = true
+local handler = Handler(Looper.getMainLooper())
+
+local function monitor()
+    if not isRunning then return end
+    local current = getClipText()
+    
+    if current and current ~= "" and current ~= lastCheckedText then
+        lastCheckedText = current
+        saveToDB(current, "clipboard_history")
+    end
+    handler.postDelayed(Runnable({run = monitor}), 500)
+end
+monitor()
+
+btnExit.onClick = function()
+    isRunning = false
+    handler.removeCallbacksAndMessages(nil)
+    dlg.dismiss()
+end
+
+lvClipboard.onItemClick = function(l, v, p, i)
+    local item = mainAdapter.getItem(p)
+    if item and item.text_item then
+        local text = tostring(item.text_item)
+        local manager = ctx.getSystemService(Context.CLIPBOARD_SERVICE)
+        manager.setPrimaryClip(ClipData.newPlainText("label", text))
+        lastCheckedText = text
+        Toast.makeText(ctx, "Copied: " .. text, Toast.LENGTH_SHORT).show()
+    end
+end
+
+lvClipboard.setOnItemLongClickListener(AdapterView.OnItemLongClickListener({
+    onItemLongClick = function(parent, view, position, id)
+        local item = mainAdapter.getItem(position)
+        if not item or not item.text_item then return true end
+        local text = tostring(item.text_item)
+        
+        local popup = ListPopupWindow(ctx)
+        local options = {"Add to favorites", "Edit", "Delete"}
+        local adapter = ArrayAdapter(ctx, android.R.layout.simple_list_item_1, options)
+        popup.setAdapter(adapter)
+        popup.setAnchorView(view)
+        popup.setWidth(400)
+        popup.setHeight(300)
+        popup.setModal(true)
+        
+        popup.setOnItemClickListener(AdapterView.OnItemClickListener({
+            onItemClick = function(p, v, pos, id)
+                if pos == 0 then
+                    saveToDB(text, "favorite_history")
                     
-                    if _G.mainDlg then
-                        _G.mainDlg.dismiss()
+                    local newItem = {text_item = text}
+                    
+                    for i = 1, #allFavoriteData do
+                        if allFavoriteData[i] and allFavoriteData[i].text_item == text then
+                            table.remove(allFavoriteData, i)
+                            break
+                        end
                     end
                     
-                    local updateAlertDlg = AlertDialog.Builder(service or activity)
-                    updateAlertDlg.setTitle("Update Available")
-                    updateAlertDlg.setMessage("New Version: " .. onlineVersion .. "\nCurrent: " .. currentVersion)
-                    updateAlertDlg.setPositiveButton("Update Now", {onClick=function(v)
-                        v.dismiss()
-                        performUpdate(onlineVersion)
-                    end})
-                    updateAlertDlg.setNegativeButton("Later", {onClick=function(v)
-                        v.dismiss()
-                        if _G.mainDlg then
-                            _G.mainDlg.show()
-                        end
-                    end})
+                    table.insert(allFavoriteData, 1, newItem)
                     
-                    local d1 = updateAlertDlg.create()
-                    d1.getWindow().setType(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY)
-                    d1.setCancelable(false)
-                    d1.show()
-                end})
+                    Toast.makeText(ctx, "Added to favorites", Toast.LENGTH_SHORT).show()
+                    
+                elseif pos == 1 then
+                    showEditDialog(text, position, false, mainAdapter, lvClipboard, allClipboardData)
+                    
+                elseif pos == 2 then
+                    local confirmDialog = LuaDialog(ctx)
+                    confirmDialog.setTitle("Delete " .. text)
+                    confirmDialog.setMessage("Delete this item?")
+                    confirmDialog.setPositiveButton("DELETE", function()
+                        deleteFromDB(text, "clipboard_history")
+                        
+                        for i = 1, #allClipboardData do
+                            if allClipboardData[i] and allClipboardData[i].text_item == text then
+                                table.remove(allClipboardData, i)
+                                break
+                            end
+                        end
+                        
+                        if #allClipboardData > 0 then
+                            loadMoreClipboardData(true)
+                        end
+                        
+                        Toast.makeText(ctx, "Deleted", Toast.LENGTH_SHORT).show()
+                    end)
+                    confirmDialog.setNegativeButton("CANCEL", nil)
+                    confirmDialog.show()
+                end
+                popup.dismiss()
             end
-        end
-    end)
-end
-
-runOriginalCode()
-
--- FIXED: Proper timing with delays to ensure synchronization
--- Give main code time to load first
-Handler(Looper.getMainLooper()).postDelayed(Runnable{
-    run = function()
-        checkAndShowNewFeatures(getCurrentVersion())
-    end
-}, 2000) -- 2 seconds delay is sufficient
-
-Handler(Looper.getMainLooper()).postDelayed(Runnable{
-    run = function()
-        checkUpdate()
-    end
-}, 4000) -- Check update a bit later
-]]
-
-    local f = io.open(mainFilePath, "w")
-    if f then
-        f:write(autoUpdateCode)
-        f:close()
+        }))
         
-        local settingsSummary = ""
-        if soundEnabled and vibrationEnabled then
-            settingsSummary = "Sound + Vibration"
-        elseif soundEnabled then
-            settingsSummary = "Sound Only"
-        elseif vibrationEnabled then
-            settingsSummary = "Vibration Only"
-        else
-            settingsSummary = "Disabled"
-        end
-        
-        local newFeaturesStatus = (userNewFeaturesLink ~= "" and "Added" or "Not provided (Optional)")
-        
-        local successDialog = AlertDialog.Builder(service)
-        successDialog.setTitle("Generate Successfully")
-        successDialog.setMessage("Auto Update Injector Professional\n\n- Update injected into: " .. category .. "/" .. selectedFolder .. "\n- Notification Settings: " .. settingsSummary .. "\n- New Features Link: " .. newFeaturesStatus)
-        successDialog.setPositiveButton("OK", function(v)
-            v.dismiss()
-        end)
-        local dlg = successDialog.create()
-        dlg.getWindow().setType(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY)
-        dlg.show()
-    else
-        showMsg("Error: Failed to write file.")
+        popup.show()
+        return true
     end
-end
-
-aboutBtn.onClick = createServerButtonHandler("About & Support")
-
-generateBtn.onClick = function()
-    generateAutoUpdate()
-end
-
-exitBtn.onClick = function() 
-    if _G.mainDlg then
-        _G.mainDlg.dismiss()
-    end
-end
+}))
