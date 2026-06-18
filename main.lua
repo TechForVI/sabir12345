@@ -1,1456 +1,1133 @@
 require "import"
+import "cjson"
 import "android.widget.*"
-import "android.view.*"
-import "android.content.*"
 import "android.os.*"
-import "java.io.File"
-import "android.database.sqlite.SQLiteDatabase"
-import "android.content.ContentValues"
-import "android.text.TextUtils"
-import "android.view.inputmethod.InputMethodManager"
-import "android.graphics.Typeface"
-import "android.app.AlertDialog"
+import "android.view.*"
+import "android.content.Context"
+import "android.graphics.Color"
 import "android.content.Intent"
 import "android.net.Uri"
+import "android.provider.MediaStore"
+import "java.io.File"
+import "android.text.InputType"
+import "android.widget.LinearLayout$LayoutParams"
+import "android.graphics.Typeface"
+import "java.net.URLEncoder"
+import "java.lang.System"
+import "com.androlua.Http"
+import "android.graphics.Bitmap"
+import "android.graphics.BitmapFactory"
+import "android.util.Base64"
+import "java.io.ByteArrayOutputStream"
+import "android.graphics.Rect"
+import "android.view.accessibility.AccessibilityNodeInfo"
 
--- ==================== کانٹیکسٹ چیک (مکمل طور پر درست) ====================
-local ctx = activity
-if not ctx then
-    ctx = service
-end
-if not ctx then
-    ctx = this
-end
-if not ctx then
-    -- آخری آپشن کے طور پر Application Context لیں
-    ctx = luajava.bindClass("android.app.ActivityThread"):currentApplication():getApplicationContext()
-end
-if not ctx then
-    print("Error: No valid context found")
-    return
-end
+-- Service mode
+local ctx = service
+local File_CLASS = luajava.bindClass("java.io.File")
 
-local backupPath = "/sdcard/Download/My Clipboard Manager Backup/"
-local dbFile = backupPath .. "storage.db"
+-- ==================== IMAGE RECOGNIZER PRO CONFIG ====================
+local AI_PREFS = "ImageRecognizerProAI"
+local aiPrefs = ctx.getSharedPreferences(AI_PREFS, Context.MODE_PRIVATE)
+local aiEditor = aiPrefs.edit()
 
-local folder = File(backupPath)
-if not folder.exists() then folder.mkdirs() end
-
--- ==================== گوگل لگ ان کنفیگریشن ====================
-local client_id = "241806017107-1r55qsfqod0san52pnpngu3oejm4acd2.apps.googleusercontent.com"
-local redirect_uri = "https://google-backup-server-habv.vercel.app/api"
-
--- ==================== پیجینیشن ویری ایبلز ====================
-local ITEMS_PER_PAGE = 1000
-local currentOffset = 0
-local favCurrentOffset = 0
-local allClipboardData = {}
-local allFavoriteData = {}
-
--- ==================== ڈیٹا بیس انیشیلائزیشن ====================
-local function initDB()
-    local d = SQLiteDatabase.openOrCreateDatabase(dbFile, nil)
-    d.execSQL("CREATE TABLE IF NOT EXISTS clipboard_history (id INTEGER PRIMARY KEY AUTOINCREMENT, content TEXT UNIQUE, time DATETIME DEFAULT CURRENT_TIMESTAMP)")
-    d.execSQL("CREATE TABLE IF NOT EXISTS favorite_history (id INTEGER PRIMARY KEY AUTOINCREMENT, content TEXT UNIQUE, time DATETIME DEFAULT CURRENT_TIMESTAMP)")
-    d.execSQL("CREATE TABLE IF NOT EXISTS user_info (id INTEGER PRIMARY KEY AUTOINCREMENT, user_name TEXT, user_email TEXT, login_time DATETIME DEFAULT CURRENT_TIMESTAMP)")
-    d.execSQL("CREATE TABLE IF NOT EXISTS access_tokens (id INTEGER PRIMARY KEY AUTOINCREMENT, access_token TEXT UNIQUE, refresh_token TEXT, token_time DATETIME DEFAULT CURRENT_TIMESTAMP)")
-    d.close()
-end
-initDB()
-
--- ==================== یوزر انفو سیو کریں ====================
-local function saveUserInfo(name, email)
-    local d = SQLiteDatabase.openOrCreateDatabase(dbFile, nil)
-    d.delete("user_info", nil, nil)
-    local values = ContentValues()
-    values.put("user_name", name)
-    values.put("user_email", email)
-    d.insert("user_info", nil, values)
-    d.close()
-end
-
--- ==================== ایکسیس ٹوکن سیو کریں ====================
-local function saveAccessToken(access_token, refresh_token)
-    local d = SQLiteDatabase.openOrCreateDatabase(dbFile, nil)
-    d.delete("access_tokens", nil, nil)
-    local values = ContentValues()
-    values.put("access_token", access_token)
-    if refresh_token and refresh_token ~= "" then
-        values.put("refresh_token", refresh_token)
-    end
-    d.insert("access_tokens", nil, values)
-    d.close()
-end
-
--- ==================== یوزر انفو لوڈ کریں ====================
-local function getUserInfo()
-    local d = SQLiteDatabase.openOrCreateDatabase(dbFile, nil)
-    local cursor = d.rawQuery("SELECT user_name, user_email FROM user_info ORDER BY id DESC LIMIT 1", nil)
-    local name, email = nil, nil
-    if cursor and cursor.getCount() > 0 then
-        cursor.moveToFirst()
-        if not cursor.isNull(0) then name = cursor.getString(0) end
-        if not cursor.isNull(1) then email = cursor.getString(1) end
-    end
-    if cursor then cursor.close() end
-    d.close()
-    return name, email
-end
-
--- ==================== لاگ آؤٹ ====================
-local function logout()
-    local d = SQLiteDatabase.openOrCreateDatabase(dbFile, nil)
-    d.delete("user_info", nil, nil)
-    d.delete("access_tokens", nil, nil)
-    d.close()
-    
-    Toast.makeText(ctx, "Logged out successfully", Toast.LENGTH_SHORT).show()
-    if btnUser then
-        btnUser.setText("USER NAME")
-    end
-end
-
--- ==================== مینوئل ٹوکن سیو ====================
-local function saveManualTokens(input, loginDialog)
-    local access, refresh, name, email = input:match("([^|]+)|([^|]*)|([^|]*)|([^|]*)")
-    
-    if access then
-        -- ٹوکن سیو کریں
-        saveAccessToken(access, refresh or "")
-        
-        -- یوزر انفو سیو کریں
-        if name and name ~= "" then
-            saveUserInfo(name, email or "")
-        end
-        
-        -- کامیابی کا میسیج
-        Toast.makeText(ctx, "✓ Login Successful!", Toast.LENGTH_SHORT).show()
-        
-        -- یوزر بٹن اپڈیٹ کریں
-        if name and name ~= "" and btnUser then
-            btnUser.setText(name)
-        end
-        
-        -- لاگ ان ڈائیلاگ بند کریں
-        if loginDialog then
-            loginDialog.dismiss()
-        end
-    else
-        Toast.makeText(ctx, "Invalid Key Format", Toast.LENGTH_LONG).show()
-    end
-end
-
--- ==================== لاگ ان ڈائیلاگ ====================
-local function showLoginDialog()
-    if not ctx then return end
-    
-    local loginLayout = {
-        LinearLayout,
-        orientation = "vertical",
-        padding = "20dp",
-        layout_width = "match_parent",
-        {
-            TextView,
-            text = "Google Drive Login",
-            textSize = "20sp",
-            textColor = "#2196F3",
-            gravity = "center",
-            layout_marginBottom = "20dp"
-        },
-        {
-            Button,
-            id = "loginBtnGetToken",
-            text = "GET ACCESS TOKEN",
-            layout_width = "match_parent",
-            backgroundColor = "#4CAF50",
-            textColor = "#FFFFFF",
-            layout_marginBottom = "15dp"
-        },
-        {
-            EditText,
-            id = "loginEtToken",
-            hint = "Paste your token here...",
-            layout_width = "match_parent",
-            layout_marginBottom = "20dp",
-            padding = "12dp",
-            backgroundColor = "#F5F5F5",
-            singleLine = true
-        },
-        {
-            LinearLayout,
-            orientation = "horizontal",
-            layout_width = "match_parent",
-            gravity = "center",
-            {
-                Button,
-                id = "loginBtnCancel",
-                text = "GO BACK",
-                layout_weight = 1,
-                layout_marginRight = "5dp",
-                backgroundColor = "#F44336",
-                textColor = "#FFFFFF",
-                padding = "12dp"
-            },
-            {
-                Button,
-                id = "loginBtnLogin",
-                text = "LOGIN",
-                layout_weight = 1,
-                layout_marginLeft = "5dp",
-                backgroundColor = "#2196F3",
-                textColor = "#FFFFFF",
-                padding = "12dp"
-            }
-        }
-    }
-    
-    local loginDialog = LuaDialog(ctx)
-    loginDialog.setTitle("Login Required")
-    loginDialog.setView(loadlayout(loginLayout))
-    
-    loginBtnGetToken.onClick = function()
-        loginDialog.dismiss()
-        
-        local scopes = "https://www.googleapis.com/auth/drive.file " .. 
-                       "https://www.googleapis.com/auth/userinfo.profile " .. 
-                       "https://www.googleapis.com/auth/userinfo.email"
-                       
-        local auth_url = "https://accounts.google.com/o/oauth2/v2/auth?"..
-                         "client_id="..client_id..
-                         "&redirect_uri="..Uri.encode(redirect_uri)..
-                         "&response_type=code"..
-                         "&scope="..Uri.encode(scopes)..
-                         "&access_type=offline"..
-                         "&prompt=consent"
-        
-        ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(auth_url)))
-    end
-    
-    loginBtnLogin.onClick = function()
-        local token_data = tostring(loginEtToken.getText()):gsub("%s+", "")
-        if #token_data > 20 then
-            saveManualTokens(token_data, loginDialog)
-        else
-            Toast.makeText(ctx, "Please enter a valid token", Toast.LENGTH_SHORT).show()
-        end
-    end
-    
-    loginBtnCancel.onClick = function()
-        loginDialog.dismiss()
-    end
-    
-    loginDialog.show()
-end
-
--- ==================== آئٹم لے آؤٹ ====================
-local item_layout = {
-    LinearLayout,
-    layout_width = "match_parent",
-    layout_height = "wrap_content",
-    {
-        TextView,
-        id = "text_item",
-        layout_width = "match_parent",
-        layout_height = "wrap_content",
-        padding = "16dp",
-        textSize = "16sp",
-        textColor = "#212121",
-        singleLine = true,
-        ellipsize = "end"
-    }
+local GEMINI_MODELS = {
+    "Gemini 2.5 Flash",
+    "Gemini 2.5 Pro",
+    "Gemini 2.0 Flash"
 }
 
--- ==================== مین لے آؤٹ ====================
-local mainLayout = {
-    LinearLayout,
-    orientation = "vertical",
-    padding = "10dp",
-    layout_width = "match_parent",
-    layout_height = "match_parent",
-    -- ٹاپ لیفٹ میں USER NAME بٹن
-    {
-        LinearLayout,
-        layout_width = "match_parent",
-        orientation = "horizontal",
-        layout_marginBottom = "5dp",
-        {
-            Button,
-            id = "btnUser",
-            text = "USER NAME",
-            textSize = "12sp",
-            layout_width = "wrap_content",
-            layout_height = "40dp",
-            backgroundColor = "#607D8B",
-            textColor = "#FFFFFF"
-        },
-        -- خالی جگہ بھرنے کے لیے
-        {
-            View,
-            layout_width = "0dp",
-            layout_height = "1dp",
-            layout_weight = 1
-        }
-    },
-    -- سرچ باکس
-    {
-        EditText,
-        id = "mainEtSearch",
-        hint = "Type to search...",
-        layout_width = "match_parent",
-        layout_height = "wrap_content",
-        visibility = "gone",
-        backgroundColor = "#FFFFFF",
-        padding = "10dp",
-        textSize = "16sp",
-        singleLine = true
-    },
-    -- کی ورڈ بٹن
-    {
-        Button,
-        id = "btnKeyword",
-        text = "ENTER KEYWORD",
-        layout_width = "match_parent",
-        layout_height = "wrap_content",
-        backgroundColor = "#2196F3",
-        textColor = "#FFFFFF"
-    },
-    -- لسٹ
-    {
-        ListView,
-        id = "lvClipboard",
-        layout_width = "match_parent",
-        layout_height = "0dp",
-        layout_weight = 1,
-        dividerHeight = "1dp",
-        backgroundColor = "#F5F5F5"
-    },
-    -- لوڈ مور بٹن
-    {
-        Button,
-        id = "btnLoadMore",
-        text = "LOAD MORE ITEMS",
-        layout_width = "match_parent",
-        layout_height = "wrap_content",
-        backgroundColor = "#4CAF50",
-        textColor = "#FFFFFF",
-        textSize = "14sp",
-        visibility = "gone",
-        layout_marginTop = "5dp",
-        layout_marginBottom = "5dp"
-    },
-    -- کینسل بٹن (سرچ کے وقت)
-    {
-        Button,
-        id = "mainBtnSearchCancel",
-        text = "CANCEL",
-        layout_width = "match_parent",
-        layout_height = "wrap_content",
-        visibility = "gone",
-        backgroundColor = "#F44336",
-        textColor = "#FFFFFF"
-    },
-    -- مین بٹن کنٹینر (4 بٹن)
-    {
-        LinearLayout,
-        id = "mainButtonsContainer",
-        layout_width = "match_parent",
-        layout_height = "wrap_content",
-        orientation = "horizontal",
-        {
-            Button,
-            text = "Backup and restore",
-            id = "btnBackupRestore",
-            layout_weight = 1,
-            backgroundColor = "#4CAF50",
-            textColor = "#FFFFFF"
-        },
-        {
-            Button,
-            text = "ABOUT AND SUPPORT",
-            id = "btnAbout",
-            layout_weight = 1,
-            backgroundColor = "#9C27B0",
-            textColor = "#FFFFFF"
-        },
-        {
-            Button,
-            text = "EXIT",
-            id = "btnExit",
-            layout_weight = 1,
-            backgroundColor = "#F44336",
-            textColor = "#FFFFFF"
-        },
-        {
-            Button,
-            text = "FAVORITE",
-            id = "btnFav",
-            layout_weight = 1,
-            backgroundColor = "#FF9800",
-            textColor = "#FFFFFF"
-        }
-    }
+local geminiApiDetails = {
+    ["Gemini 2.5 Flash"] = { id = "models/gemini-2.5-flash", version = "v1beta" },
+    ["Gemini 2.5 Pro"] = { id = "models/gemini-2.5-pro", version = "v1beta" },
+    ["Gemini 2.0 Flash"] = { id = "models/gemini-2.0-flash", version = "v1beta" }
 }
 
-local dlg = LuaDialog(ctx)
-dlg.setTitle("My Clipboard Manager")
-dlg.setView(loadlayout(mainLayout))
+local POPULAR_LANGUAGES = {
+    "English", "Urdu (اردو)", "Hindi (हिन्दी)", "Arabic (العربية)", 
+    "Punjabi (پنجابی)", "Pashto (پشتو)", "Sindhi (سنڌي)", "Persian (فارسی)",
+    "Spanish (Español)", "French (Français)", "German (Deutsch)", 
+    "Chinese (中文)", "Russian (Русский)", "Japanese (日本語)", 
+    "Turkish (Türkçe)", "Bengali (বাংলা)", "Portuguese (Português)"
+}
 
--- مین ایڈاپٹر
-local mainAdapter = LuaAdapter(ctx, {}, item_layout)
-lvClipboard.setAdapter(mainAdapter)
+local RECOGNIZE_OPTIONS = {
+    "Image Process",
+    "Current Screen",
+    "Current Item",
+    "Extract Text Only"
+}
 
--- ==================== کلپ بورڈ مانیٹرنگ ====================
-local function getClipText()
-    if not ctx then return nil end
-    local manager = ctx.getSystemService(Context.CLIPBOARD_SERVICE)
-    if manager and manager.hasPrimaryClip() then
-        local clip = manager.getPrimaryClip()
-        if clip and clip.getItemCount() > 0 then
-            local item = clip.getItemAt(0)
-            if item and item.getText() then 
-                return tostring(item.getText())
-            end
+local photoFilePaths = {}
+local selectedPhotoPath = ""
+local mainDlg = nil
+local processButton = nil
+
+function notify(msg)
+  if service and service.speak then service.speak(msg) end
+  Toast.makeText(ctx, msg, Toast.LENGTH_SHORT).show()
+end
+
+function vibrate()
+    local vibrator = ctx.getSystemService(Context.VIBRATOR_SERVICE)
+    if vibrator then vibrator.vibrate(35) end
+end
+
+-- ==================== PREFERENCES FUNCTIONS ====================
+function getGeminiApiKey() return aiPrefs.getString("gemini_apiKey", "") end
+function saveGeminiApiKey(key) aiEditor.putString("gemini_apiKey", key); aiEditor.commit() end
+function getSelectedLanguage() return aiPrefs.getString("selected_language", "English") end
+function saveSelectedLanguage(lang) aiEditor.putString("selected_language", lang); aiEditor.commit() end
+function getGeminiModel() return aiPrefs.getString("gemini_model", "Gemini 2.5 Flash") end
+function saveGeminiModel(model) aiEditor.putString("gemini_model", model); aiEditor.commit() end
+function getSelectedRecognizeOption() return aiPrefs.getString("rec_option", "Image Process") end
+function saveSelectedRecognizeOption(opt) aiEditor.putString("rec_option", opt); aiEditor.commit() end
+
+-- ==================== GET CURRENT FOCUSED ITEM ====================
+function getCurrentFocusedItem()
+    local focusedNode = nil
+    
+    -- Try multiple methods to get focused node
+    if service.getFocusView then
+        local success, result = pcall(function() return service.getFocusView() end)
+        if success and result then
+            focusedNode = result
         end
     end
+    
+    if not focusedNode and service.getCurrentNode then
+        local success, result = pcall(function() return service.getCurrentNode() end)
+        if success and result then
+            focusedNode = result
+        end
+    end
+    
+    if not focusedNode and service.findFocus then
+        local success, result = pcall(function() return service.findFocus() end)
+        if success and result then
+            focusedNode = result
+        end
+    end
+    
+    if not focusedNode and service.getRootInActiveWindow then
+        local success, root = pcall(function() return service.getRootInActiveWindow() end)
+        if success and root then
+            focusedNode = findFocusedNodeInTree(root)
+        end
+    end
+    
+    return focusedNode
+end
+
+function findFocusedNodeInTree(node)
+    if not node then return nil end
+    
+    local isFocused = false
+    pcall(function() isFocused = node.isFocused() end)
+    if isFocused then return node end
+    
+    local childCount = 0
+    pcall(function() childCount = node.getChildCount() end)
+    
+    for i = 0, childCount - 1 do
+        local child = nil
+        pcall(function() child = node.getChild(i) end)
+        if child then
+            local result = findFocusedNodeInTree(child)
+            if result then return result end
+        end
+    end
+    
     return nil
 end
 
--- ==================== مزید کلپ بورڈ ڈیٹا لوڈ کریں ====================
-local function loadMoreClipboardData(reset)
-    if reset then
-        currentOffset = 0
-        mainAdapter.clear()
-    end
+-- ==================== GET ITEM INFORMATION ====================
+function getItemDetails(node)
+    if not node then return nil end
     
-    local startIndex = currentOffset + 1
-    local endIndex = math.min(currentOffset + ITEMS_PER_PAGE, #allClipboardData)
+    local details = {}
     
-    if startIndex <= endIndex then
-        for i = startIndex, endIndex do
-            if allClipboardData[i] then
-                mainAdapter.add(allClipboardData[i])
-            end
-        end
-    end
-    
-    currentOffset = endIndex
-    local hasMoreItems = (currentOffset < #allClipboardData)
-    
-    if hasMoreItems then
-        btnLoadMore.setVisibility(View.VISIBLE)
-    else
-        btnLoadMore.setVisibility(View.GONE)
-    end
-    
-    mainAdapter.notifyDataSetChanged()
-end
-
--- ==================== تمام ڈیٹا کیش لوڈ کریں ====================
-local function loadAllDataToCache()
-    task(function(dbFile)
-        require "import"
-        import "android.database.sqlite.SQLiteDatabase"
-        local clipData = {}
-        local favData = {}
-        
-        local d = SQLiteDatabase.openOrCreateDatabase(dbFile, nil)
-        local cursor = d.rawQuery("SELECT content FROM clipboard_history ORDER BY id DESC", nil)
-        if cursor and cursor.getCount() > 0 then
-            cursor.moveToFirst()
-            while not cursor.isAfterLast() do
-                if not cursor.isNull(0) then
-                    local content = cursor.getString(0)
-                    if content and content ~= "" then
-                        table.insert(clipData, tostring(content))
-                    end
-                end
-                cursor.moveToNext()
-            end
-        end
-        if cursor then cursor.close() end
-        
-        cursor = d.rawQuery("SELECT content FROM favorite_history ORDER BY id DESC", nil)
-        if cursor and cursor.getCount() > 0 then
-            cursor.moveToFirst()
-            while not cursor.isAfterLast() do
-                if not cursor.isNull(0) then
-                    local content = cursor.getString(0)
-                    if content and content ~= "" then
-                        table.insert(favData, tostring(content))
-                    end
-                end
-                cursor.moveToNext()
-            end
-        end
-        if cursor then cursor.close() end
-        
-        d.close()
-        return {clip = clipData, fav = favData}
-    end, dbFile, function(data)
-        allClipboardData = {}
-        allFavoriteData = {}
-        
-        if data and data.clip then
-            for i = 1, #data.clip do
-                local text = data.clip[i]
-                if text then
-                    table.insert(allClipboardData, {text_item = text})
-                end
-            end
-        end
-        
-        if data and data.fav then
-            for i = 1, #data.fav do
-                local text = data.fav[i]
-                if text then
-                    table.insert(allFavoriteData, {text_item = text})
-                end
-            end
-        end
-        
-        if #allClipboardData > 0 then
-            loadMoreClipboardData(true)
+    -- Get text
+    pcall(function()
+        local text = node.getText()
+        if text and tostring(text) ~= "null" and tostring(text) ~= "" then
+            details.text = tostring(text)
         end
     end)
-end
-
--- ==================== ڈیٹا بیس آپریشنز ====================
-function saveToDB(text, tableName)
-    if not text or text == "" then return end
-    task(function(dbPath, text, tableName)
-        require "import"
-        import "android.database.sqlite.SQLiteDatabase"
-        import "android.content.ContentValues"
-        local d = SQLiteDatabase.openOrCreateDatabase(dbPath, nil)
-        d.delete(tableName, "content=?", {text})
-        local values = ContentValues()
-        values.put("content", text)
-        d.insert(tableName, nil, values)
-        d.close()
-        return true
-    end, dbFile, text, tableName, function()
-        loadAllDataToCache()
+    
+    -- Get content description
+    pcall(function()
+        local desc = node.getContentDescription()
+        if desc and tostring(desc) ~= "null" and tostring(desc) ~= "" then
+            details.contentDescription = tostring(desc)
+        end
     end)
-end
-
-function deleteFromDB(text, tableName)
-    task(function(dbPath, text, tableName)
-        require "import"
-        import "android.database.sqlite.SQLiteDatabase"
-        local d = SQLiteDatabase.openOrCreateDatabase(dbPath, nil)
-        d.delete(tableName, "content=?", {text})
-        d.close()
-        return true
-    end, dbFile, text, tableName, function()
-        loadAllDataToCache()
+    
+    -- Get class name
+    pcall(function()
+        local className = node.getClassName()
+        if className then
+            local classStr = tostring(className)
+            details.className = classStr
+            -- Extract simple name
+            local simpleName = classStr:match("%.(%w+)$") or classStr
+            details.simpleType = simpleName
+        end
     end)
-end
-
--- ==================== سرچ فنکشن ====================
-local function searchInCache(cache, keyword, adapter, isFavorite)
-    adapter.clear()
-    if keyword == nil or keyword == "" then
-        if not isFavorite then
-            if #allClipboardData > 0 then
-                loadMoreClipboardData(true)
-            end
+    
+    -- Get view ID
+    pcall(function()
+        local viewId = node.getViewIdResourceName()
+        if viewId and tostring(viewId) ~= "null" and tostring(viewId) ~= "" then
+            details.viewId = tostring(viewId)
         end
-    else
-        local searchKey = string.lower(keyword)
-        local tempItems = {}
-        local dataToSearch = isFavorite and allFavoriteData or allClipboardData
-        
-        for i = 1, #dataToSearch do
-            local item = dataToSearch[i]
-            if item and item.text_item and string.find(string.lower(item.text_item), searchKey, 1, true) then
-                table.insert(tempItems, item)
-            end
-        end
-        
-        for i = 1, #tempItems do
-            adapter.add(tempItems[i])
-        end
-    end
-    adapter.notifyDataSetChanged()
-end
-
--- ==================== یوزر پروفائل ڈائیلاگ ====================
-local function showProfileDialog()
-    if not ctx then return end
+    end)
     
-    -- پہلے چیک کریں کہ یوزر لاگ ان ہے یا نہیں
-    local name, email = getUserInfo()
+    -- Check if clickable
+    pcall(function()
+        details.isClickable = node.isClickable()
+    end)
     
-    if not name then
-        -- لاگ ان نہیں، لاگ ان ڈائیلاگ دکھائیں
-        showLoginDialog()
-        return
-    end
+    -- Check if checkable
+    pcall(function()
+        details.isCheckable = node.isCheckable()
+    end)
     
-    -- لاگ ان ہے، پروفائل ڈائیلاگ دکھائیں
-    local profileLayout = {
-        LinearLayout,
-        orientation = "vertical",
-        padding = "20dp",
-        layout_width = "match_parent",
-        {
-            TextView,
-            text = "User Profile",
-            textSize = "20sp",
-            textColor = "#2196F3",
-            gravity = "center",
-            layout_marginBottom = "20dp"
-        },
-        {
-            TextView,
-            id = "profileName",
-            text = "Name: " .. (name or "Unknown"),
-            textSize = "16sp",
-            textColor = "#212121",
-            layout_marginBottom = "10dp",
-            typeface = Typeface.DEFAULT_BOLD
-        },
-        {
-            TextView,
-            id = "profileEmail",
-            text = "Email: " .. (email or "Not provided"),
-            textSize = "14sp",
-            layout_marginBottom = "20dp"
-        },
-        {
-            Button,
-            id = "btnLogout",
-            text = "LOGOUT",
-            layout_width = "match_parent",
-            backgroundColor = "#F44336",
-            textColor = "#FFFFFF",
-            layout_marginBottom = "10dp"
-        },
-        {
-            Button,
-            id = "btnDeleteAccount",
-            text = "DELETE ACCOUNT PERMANENTLY",
-            layout_width = "match_parent",
-            backgroundColor = "#000000",
-            textColor = "#FFFFFF"
-        },
-        {
-            Button,
-            id = "btnProfileClose",
-            text = "CLOSE",
-            layout_width = "match_parent",
-            backgroundColor = "#2196F3",
-            textColor = "#FFFFFF",
-            layout_marginTop = "10dp"
-        }
-    }
+    -- Check if checked
+    pcall(function()
+        details.isChecked = node.isChecked()
+    end)
     
-    local profileDialog = LuaDialog(ctx)
-    profileDialog.setTitle("Profile Settings")
-    profileDialog.setView(loadlayout(profileLayout))
+    -- Check if enabled
+    pcall(function()
+        details.isEnabled = node.isEnabled()
+    end)
     
-    btnLogout.onClick = function()
-        local builder = AlertDialog.Builder(ctx)
-        builder.setTitle("Confirm Logout")
-        builder.setMessage("Are you sure you want to logout?")
-        builder.setPositiveButton("Yes", function()
-            logout()
-            profileDialog.dismiss()
-        end)
-        builder.setNegativeButton("No", nil)
-        builder.show()
-    end
-    
-    btnDeleteAccount.onClick = function()
-        local builder = AlertDialog.Builder(ctx)
-        builder.setTitle("Delete Account")
-        builder.setMessage("This will permanently delete all your data. This action cannot be undone. Continue?")
-        builder.setPositiveButton("DELETE", function()
-            local d = SQLiteDatabase.openOrCreateDatabase(dbFile, nil)
-            d.delete("user_info", nil, nil)
-            d.delete("access_tokens", nil, nil)
-            d.close()
-            
-            Toast.makeText(ctx, "Account deleted", Toast.LENGTH_SHORT).show()
-            if btnUser then btnUser.setText("USER NAME") end
-            profileDialog.dismiss()
-        end)
-        builder.setNegativeButton("Cancel", nil)
-        builder.show()
-    end
-    
-    btnProfileClose.onClick = function()
-        profileDialog.dismiss()
-    end
-    
-    profileDialog.show()
-end
-
--- ==================== ایڈٹ ڈائیلاگ ====================
-local function showEditDialog(itemText, position, isFavorite, adapter, listView, cache)
-    if not ctx then return end
-    
-    local editLayout = {
-        LinearLayout,
-        orientation = "vertical",
-        padding = "20dp",
-        layout_width = "match_parent",
-        {
-            EditText,
-            id = "etEdit",
-            text = itemText,
-            layout_width = "match_parent",
-            layout_marginBottom = "15dp"
-        },
-        {
-            LinearLayout,
-            orientation = "horizontal",
-            layout_width = "match_parent",
-            gravity = "center",
-            {
-                Button,
-                text = "CANCEL",
-                id = "btnCancel",
-                layout_weight = 1,
-                layout_marginRight = "5dp",
-                backgroundColor = "#9E9E9E",
-                textColor = "#FFFFFF"
-            },
-            {
-                Button,
-                text = "OK",
-                id = "btnOk",
-                layout_weight = 1,
-                layout_marginLeft = "5dp",
-                backgroundColor = "#2196F3",
-                textColor = "#FFFFFF"
+    -- Get bounds
+    pcall(function()
+        local rect = Rect()
+        node.getBoundsInScreen(rect)
+        if rect.right > rect.left and rect.bottom > rect.top then
+            details.bounds = {
+                left = rect.left,
+                top = rect.top,
+                right = rect.right,
+                bottom = rect.bottom,
+                width = rect.right - rect.left,
+                height = rect.bottom - rect.top
             }
-        }
-    }
-    
-    local editDialog = LuaDialog(ctx)
-    editDialog.setTitle("Edit")
-    editDialog.setView(loadlayout(editLayout))
-    
-    btnCancel.onClick = function()
-        editDialog.dismiss()
-    end
-    
-    btnOk.onClick = function()
-        local newText = etEdit.getText()
-        if newText then
-            newText = tostring(newText)
-            if newText ~= "" and newText ~= itemText then
-                local tableName = isFavorite and "favorite_history" or "clipboard_history"
-                
-                deleteFromDB(itemText, tableName)
-                saveToDB(newText, tableName)
-                
-                if isFavorite then
-                    for i = 1, #allFavoriteData do
-                        if allFavoriteData[i] and allFavoriteData[i].text_item == itemText then
-                            allFavoriteData[i].text_item = newText
-                            break
-                        end
-                    end
-                else
-                    for i = 1, #allClipboardData do
-                        if allClipboardData[i] and allClipboardData[i].text_item == itemText then
-                            allClipboardData[i].text_item = newText
-                            break
-                        end
-                    end
-                end
-                
-                if not isFavorite then
-                    if #allClipboardData > 0 then
-                        loadMoreClipboardData(true)
-                    end
-                end
-                
-                if listView then listView.setSelection(0) end
-            end
         end
-        editDialog.dismiss()
-    end
+    end)
     
-    editDialog.show()
+    return details
 end
 
--- ==================== مزید فیورٹ ڈیٹا لوڈ کریں ====================
-local function loadMoreFavoriteData(adapter, reset)
-    if reset then
-        favCurrentOffset = 0
-        adapter.clear()
-    end
+-- ==================== GENERATE ITEM DESCRIPTION ====================
+function generateItemDescription(details)
+    if not details then return "No item information available." end
     
-    local startIndex = favCurrentOffset + 1
-    local endIndex = math.min(favCurrentOffset + ITEMS_PER_PAGE, #allFavoriteData)
+    local description = {}
     
-    if startIndex <= endIndex then
-        for i = startIndex, endIndex do
-            if allFavoriteData[i] then
-                adapter.add(allFavoriteData[i])
-            end
-        end
-    end
-    
-    favCurrentOffset = endIndex
-    local favHasMoreItems = (favCurrentOffset < #allFavoriteData)
-    
-    return favHasMoreItems
-end
-
--- ==================== فیورٹ ڈائیلاگ ====================
-local function showFavoritesDialog()
-    if not ctx then return end
-    
-    local favDialog = LuaDialog(ctx)
-    favDialog.setTitle("Favorites")
-    
-    local favLayout = {
-        LinearLayout,
-        orientation = "vertical",
-        padding = "10dp",
-        layout_width = "match_parent",
-        layout_height = "match_parent",
-        {
-            EditText,
-            id = "favEtSearch",
-            hint = "Type to search...",
-            layout_width = "match_parent",
-            layout_height = "wrap_content",
-            visibility = "gone",
-            backgroundColor = "#FFFFFF",
-            padding = "10dp",
-            textSize = "16sp",
-            singleLine = true
-        },
-        {
-            Button,
-            id = "favBtnKeyword",
-            text = "ENTER KEYWORD",
-            layout_width = "match_parent",
-            layout_height = "wrap_content",
-            layout_marginBottom = "5dp",
-            backgroundColor = "#2196F3",
-            textColor = "#FFFFFF",
-            textSize = "16sp"
-        },
-        {
-            ListView,
-            id = "favLvClipboard",
-            layout_width = "match_parent",
-            layout_height = "0dp",
-            layout_weight = 1,
-            layout_marginTop = "5dp",
-            layout_marginBottom = "5dp",
-            dividerHeight = "1dp",
-            backgroundColor = "#F5F5F5"
-        },
-        {
-            Button,
-            id = "favBtnLoadMore",
-            text = "LOAD MORE ITEMS",
-            layout_width = "match_parent",
-            layout_height = "wrap_content",
-            backgroundColor = "#4CAF50",
-            textColor = "#FFFFFF",
-            textSize = "14sp",
-            visibility = "gone",
-            layout_marginBottom = "5dp"
-        },
-        {
-            Button,
-            id = "favBtnSearchCancel",
-            text = "CANCEL",
-            layout_width = "match_parent",
-            layout_height = "wrap_content",
-            visibility = "gone",
-            backgroundColor = "#F44336",
-            textColor = "#FFFFFF",
-            textSize = "14sp",
-            layout_marginBottom = "5dp"
-        },
-        {
-            LinearLayout,
-            id = "favButtonsContainer",
-            layout_width = "match_parent",
-            layout_height = "wrap_content",
-            orientation = "horizontal",
-            gravity = "center",
-            {
-                Button,
-                text = "MANAGE",
-                id = "favBtnManage",
-                layout_weight = 1,
-                layout_height = "wrap_content",
-                layout_marginRight = "2dp",
-                backgroundColor = "#4CAF50",
-                textColor = "#FFFFFF",
-                textSize = "14sp"
-            },
-            {
-                Button,
-                text = "EXIT",
-                id = "favBtnExit",
-                layout_weight = 1,
-                layout_height = "wrap_content",
-                layout_marginLeft = "2dp",
-                layout_marginRight = "2dp",
-                backgroundColor = "#F44336",
-                textColor = "#FFFFFF",
-                textSize = "14sp"
-            },
-            {
-                Button,
-                text = "NEW",
-                id = "favBtnNew",
-                layout_weight = 1,
-                layout_height = "wrap_content",
-                layout_marginLeft = "2dp",
-                backgroundColor = "#FF9800",
-                textColor = "#FFFFFF",
-                textSize = "14sp"
-            }
-        }
-    }
-    
-    favDialog.setView(loadlayout(favLayout))
-    
-    local favAdapter = LuaAdapter(ctx, {}, item_layout)
-    favLvClipboard.setAdapter(favAdapter)
-    
-    local function loadMoreFavorites(reset)
-        if reset then
-            favCurrentOffset = 0
-            favAdapter.clear()
-        end
-        
-        local startIndex = favCurrentOffset + 1
-        local endIndex = math.min(favCurrentOffset + ITEMS_PER_PAGE, #allFavoriteData)
-        
-        if startIndex <= endIndex then
-            for i = startIndex, endIndex do
-                if allFavoriteData[i] then
-                    favAdapter.add(allFavoriteData[i])
-                end
-            end
-        end
-        
-        favCurrentOffset = endIndex
-        local favHasMoreItems = (favCurrentOffset < #allFavoriteData)
-        
-        if favHasMoreItems then
-            favBtnLoadMore.setVisibility(View.VISIBLE)
+    -- Type identification
+    if details.simpleType then
+        if details.simpleType:find("Button") then
+            table.insert(description, "This is a Button")
+        elseif details.simpleType:find("Image") then
+            table.insert(description, "This is an Icon/Image")
+        elseif details.simpleType:find("Text") then
+            table.insert(description, "This is a Text element")
+        elseif details.simpleType:find("Check") then
+            table.insert(description, "This is a Checkbox")
+        elseif details.simpleType:find("Switch") then
+            table.insert(description, "This is a Switch")
+        elseif details.simpleType:find("Edit") then
+            table.insert(description, "This is an Input Field")
         else
-            favBtnLoadMore.setVisibility(View.GONE)
+            table.insert(description, "This is a " .. details.simpleType)
+        end
+    else
+        table.insert(description, "This is a UI Element")
+    end
+    
+    -- Text content
+    if details.text and details.text ~= "" then
+        table.insert(description, "Text: \"" .. details.text .. "\"")
+    end
+    
+    -- Content description
+    if details.contentDescription and details.contentDescription ~= "" then
+        table.insert(description, "Description: \"" .. details.contentDescription .. "\"")
+    end
+    
+    -- View ID (often indicates what the icon is)
+    if details.viewId and details.viewId ~= "" then
+        local idName = details.viewId:match("/([^/]+)$") or details.viewId
+        table.insert(description, "Element ID: " .. idName)
+    end
+    
+    -- Clickable status
+    if details.isClickable then
+        table.insert(description, "This element can be clicked/tapped")
+    else
+        table.insert(description, "This element is not clickable")
+    end
+    
+    -- Check state
+    if details.isCheckable then
+        if details.isChecked then
+            table.insert(description, "This is checked/selected")
+        else
+            table.insert(description, "This is not checked")
         end
     end
     
-    if allFavoriteData and #allFavoriteData > 0 then
-        loadMoreFavorites(true)
+    -- Size information
+    if details.bounds then
+        table.insert(description, "Size: " .. details.bounds.width .. "x" .. details.bounds.height .. " pixels")
     end
     
-    favBtnLoadMore.onClick = function()
-        loadMoreFavorites(false)
+    return table.concat(description, "\n")
+end
+
+-- ==================== ANALYZE CURRENT ITEM ====================
+function analyzeCurrentItem()
+    -- Wait for focus to stabilize
+    Thread.sleep(300)
+    
+    -- Get focused node
+    local focusedNode = getCurrentFocusedItem()
+    
+    if not focusedNode then
+        return "No item focused.\n\nPlease focus on any icon or element first by moving to it using your screen reader, then try again."
     end
     
-    local favSearchHandler = Handler()
-    local favSearchRunnable = nil
+    -- Get item details
+    local details = getItemDetails(focusedNode)
     
-    favBtnKeyword.onClick = function()
-        favBtnKeyword.setVisibility(8)
-        favButtonsContainer.setVisibility(8)
-        favEtSearch.setVisibility(0)
-        favBtnSearchCancel.setVisibility(0)
-        favBtnLoadMore.setVisibility(8)
-        favEtSearch.requestFocus()
-        
-        local imm = ctx.getSystemService(Context.INPUT_METHOD_SERVICE)
-        imm.toggleSoftInput(InputMethodManager.SHOW_FORCED, 0)
+    if not details then
+        return "Could not get item information. Please try focusing on a different element."
     end
     
-    favEtSearch.addTextChangedListener({
-        onTextChanged = function(s)
-            if favSearchRunnable then favSearchHandler.removeCallbacks(favSearchRunnable) end
-            favSearchRunnable = Runnable({
-                run = function()
-                    searchInCache(allFavoriteData, tostring(s), favAdapter, true)
-                end
-            })
-            favSearchHandler.postDelayed(favSearchRunnable, 1000)
+    -- Check if we have meaningful information
+    local hasInfo = (details.text and details.text ~= "") or 
+                    (details.contentDescription and details.contentDescription ~= "") or
+                    (details.viewId and details.viewId ~= "")
+    
+    if not hasInfo then
+        return "Item information:\n\n" ..
+               "Type: " .. (details.simpleType or "Unknown") .. "\n" ..
+               "Clickable: " .. (details.isClickable and "Yes" or "No") .. "\n\n" ..
+               "This element has no text label or description. It may be a pure visual icon."
+    end
+    
+    local language = getSelectedLanguage()
+    local itemDesc = generateItemDescription(details)
+    
+    -- For Current Item, we'll use the accessibility information directly
+    -- No image capture needed since we have all the info from accessibility
+    local resultText = ""
+    
+    -- Parse view ID to guess icon type if possible
+    local iconHint = ""
+    if details.viewId then
+        local idLower = details.viewId:lower()
+        if idLower:find("settings") then
+            iconHint = "\n💡 This appears to be a Settings icon."
+        elseif idLower:find("home") then
+            iconHint = "\n💡 This appears to be a Home icon."
+        elseif idLower:find("back") then
+            iconHint = "\n💡 This appears to be a Back navigation icon."
+        elseif idLower:find("share") then
+            iconHint = "\n💡 This appears to be a Share icon."
+        elseif idLower:find("like") or idLower:find("thumbs") then
+            iconHint = "\n💡 This appears to be a Like button."
+        elseif idLower:find("comment") then
+            iconHint = "\n💡 This appears to be a Comment icon."
+        elseif idLower:find("search") then
+            iconHint = "\n💡 This appears to be a Search icon."
+        elseif idLower:find("menu") or idLower:find("hamburger") then
+            iconHint = "\n💡 This appears to be a Menu icon."
+        elseif idLower:find("camera") then
+            iconHint = "\n💡 This appears to be a Camera icon."
+        elseif idLower:find("mic") or idLower:find("microphone") then
+            iconHint = "\n💡 This appears to be a Microphone icon."
+        elseif idLower:find("send") then
+            iconHint = "\n💡 This appears to be a Send icon."
+        elseif idLower:find("attach") or idLower:find("clip") then
+            iconHint = "\n💡 This appears to be an Attach file icon."
         end
-    })
-    
-    favBtnSearchCancel.onClick = function()
-        favEtSearch.setVisibility(8)
-        favBtnSearchCancel.setVisibility(8)
-        favBtnKeyword.setVisibility(0)
-        favButtonsContainer.setVisibility(0)
-        favEtSearch.setText("")
-        
-        loadMoreFavorites(true)
-        
-        local imm = ctx.getSystemService(Context.INPUT_METHOD_SERVICE)
-        imm.hideSoftInputFromWindow(favEtSearch.getWindowToken(), 0)
     end
     
-    favBtnManage.onClick = function()
-        if #allFavoriteData == 0 then
-            Toast.makeText(ctx, "Favorites list is empty", Toast.LENGTH_SHORT).show()
-            return
+    -- Build analysis based on available information
+    resultText = "📱 **Current Item Analysis**\n\n"
+    resultText = resultText .. "**What is this element?**\n"
+    
+    -- Determine element type
+    if details.simpleType then
+        if details.simpleType:find("Button") then
+            resultText = resultText .. "• Type: Button\n"
+        elseif details.simpleType:find("Image") then
+            resultText = resultText .. "• Type: Icon / Image Button\n"
+        elseif details.simpleType:find("Text") then
+            resultText = resultText .. "• Type: Text Label\n"
+        elseif details.simpleType:find("Check") then
+            resultText = resultText .. "• Type: Checkbox\n"
+        elseif details.simpleType:find("Switch") then
+            resultText = resultText .. "• Type: Toggle Switch\n"
+        else
+            resultText = resultText .. "• Type: " .. details.simpleType .. "\n"
         end
-        
-        local manageDialog = LuaDialog(ctx)
-        manageDialog.setTitle("Manage Favorites")
-        manageDialog.setMessage("Clear all favorites?")
-        manageDialog.setPositiveButton("Clear All", function()
-            task(function(dbPath)
-                require "import"
-                import "android.database.sqlite.SQLiteDatabase"
-                local d = SQLiteDatabase.openOrCreateDatabase(dbPath, nil)
-                d.delete("favorite_history", nil, nil)
-                d.close()
-                return true
-            end, dbFile, function()
-                loadAllDataToCache()
-            end)
-            
-            Toast.makeText(ctx, "All favorites cleared", Toast.LENGTH_SHORT).show()
-        end)
-        manageDialog.setNeutralButton("Cancel", nil)
-        manageDialog.show()
     end
     
-    favBtnNew.onClick = function()
-        local newLayout = {
-            LinearLayout,
-            orientation = "vertical",
-            padding = "20dp",
-            {
-                EditText,
-                id = "newFavEt",
-                hint = "Enter new favorite...",
-                layout_width = "match_parent"
+    -- Add text/description
+    if details.text and details.text ~= "" then
+        resultText = resultText .. "• Label: \"" .. details.text .. "\"\n"
+    end
+    if details.contentDescription and details.contentDescription ~= "" then
+        resultText = resultText .. "• Description: \"" .. details.contentDescription .. "\"\n"
+    end
+    
+    -- Add clickable info
+    if details.isClickable then
+        resultText = resultText .. "• Action: Clickable - triggers an action when tapped\n"
+    end
+    
+    resultText = resultText .. "\n**What app does this belong to?**\n"
+    
+    -- Try to guess app from view ID or context
+    if details.viewId then
+        if details.viewId:find("whatsapp") or details.viewId:find("wa_") then
+            resultText = resultText .. "• This appears to be from **WhatsApp**\n"
+        elseif details.viewId:find("telegram") then
+            resultText = resultText .. "• This appears to be from **Telegram**\n"
+        elseif details.viewId:find("gmail") or details.viewId:find("google") then
+            resultText = resultText .. "• This appears to be from **Google/Gmail**\n"
+        elseif details.viewId:find("youtube") then
+            resultText = resultText .. "• This appears to be from **YouTube**\n"
+        elseif details.viewId:find("instagram") then
+            resultText = resultText .. "• This appears to be from **Instagram**\n"
+        elseif details.viewId:find("facebook") then
+            resultText = resultText .. "• This appears to be from **Facebook**\n"
+        else
+            resultText = resultText .. "• App could not be determined from element ID\n"
+        end
+    else
+        resultText = resultText .. "• App could not be determined\n"
+    end
+    
+    resultText = resultText .. "\n**What does this element do?**\n"
+    
+    -- Determine function based on ID and text
+    local functionText = ""
+    if details.viewId then
+        local idLower = details.viewId:lower()
+        if idLower:find("settings") then
+            functionText = "Opens settings/preferences menu"
+        elseif idLower:find("home") then
+            functionText = "Navigates to home screen"
+        elseif idLower:find("back") then
+            functionText = "Goes back to previous screen"
+        elseif idLower:find("share") then
+            functionText = "Shares content with others"
+        elseif idLower:find("like") then
+            functionText = "Likes/favorites the content"
+        elseif idLower:find("comment") then
+            functionText = "Opens comments section"
+        elseif idLower:find("search") then
+            functionText = "Opens search interface"
+        elseif idLower:find("menu") then
+            functionText = "Opens navigation menu"
+        elseif idLower:find("camera") then
+            functionText = "Opens camera to take photo"
+        elseif idLower:find("mic") then
+            functionText = "Starts voice input/recording"
+        elseif idLower:find("send") then
+            functionText = "Sends message or content"
+        elseif idLower:find("attach") then
+            functionText = "Attaches file or media"
+        elseif idLower:find("delete") or idLower:find("trash") then
+            functionText = "Deletes the item"
+        elseif idLower:find("edit") then
+            functionText = "Edits the content"
+        elseif idLower:find("add") or idLower:find("plus") then
+            functionText = "Adds new item"
+        else
+            functionText = "Triggers its associated action when tapped"
+        end
+    else
+        functionText = "Triggers its associated action when tapped"
+    end
+    
+    resultText = resultText .. "• " .. functionText .. "\n"
+    
+    resultText = resultText .. "\n**Summary:**\n"
+    if details.text and details.text ~= "" then
+        resultText = resultText .. "• This is a " .. (details.simpleType or "UI element") .. " labeled \"" .. details.text .. "\""
+    elseif details.contentDescription and details.contentDescription ~= "" then
+        resultText = resultText .. "• This is a " .. (details.simpleType or "UI element") .. " for \"" .. details.contentDescription .. "\""
+    else
+        resultText = resultText .. "• This is a " .. (details.simpleType or "visual icon") .. " " .. functionText:lower()
+    end
+    resultText = resultText .. ".\n"
+    
+    if iconHint ~= "" then
+        resultText = resultText .. iconHint .. "\n"
+    end
+    
+    return resultText
+end
+
+-- ==================== ANALYZE CURRENT SCREEN ====================
+function analyzeCurrentScreen()
+    return "📱 **Current Screen Analysis**\n\n" ..
+           "To analyze the current screen, please use this feature with an image.\n" ..
+           "The Current Item mode analyzes the focused element using accessibility information.\n\n" ..
+           "**How to use Current Item:**\n" ..
+           "1. Navigate to any icon or button using your screen reader\n" ..
+           "2. Make sure the element is focused (highlighted)\n" ..
+           "3. Select 'Current Item' from the dropdown\n" ..
+           "4. Click Process\n\n" ..
+           "The plugin will identify the icon and explain its function."
+end
+
+-- ==================== IMAGE TO BASE64 ====================
+function pathToBase64(imagePath)
+    if not imagePath or imagePath == "" then return nil end
+    local imgFile = File_CLASS(imagePath)
+    if not imgFile.exists() or not imgFile.canRead() then return nil end
+    local options = BitmapFactory.Options()
+    options.inSampleSize = 2
+    local bitmap = BitmapFactory.decodeFile(imagePath, options)
+    if not bitmap then return nil end
+    local outputStream = ByteArrayOutputStream()
+    bitmap.compress(Bitmap.CompressFormat.JPEG, 80, outputStream)
+    local imageBytes = outputStream.toByteArray()
+    outputStream.close()
+    bitmap.recycle()
+    return Base64.encodeToString(imageBytes, Base64.NO_WRAP)
+end
+
+-- ==================== GEMINI API CALL ====================
+function callGeminiWithImage(apiKey, model, base64Data, prompt, callback)
+    local modelInfo = geminiApiDetails[model]
+    local url = "https://generativelanguage.googleapis.com/" .. modelInfo.version .. "/" .. modelInfo.id .. ":generateContent?key=" .. apiKey
+    local payload = {
+        contents = {{
+            parts = {
+                { text = prompt },
+                { inlineData = { mimeType = "image/jpeg", data = base64Data } }
             }
-        }
-        
-        local newDialog = LuaDialog(ctx)
-        newDialog.setTitle("Add New Favorite")
-        newDialog.setView(loadlayout(newLayout))
-        newDialog.setPositiveButton("Add", function()
-            local newText = newFavEt.getText()
-            if newText then
-                newText = tostring(newText)
-                if newText ~= "" then
-                    saveToDB(newText, "favorite_history")
-                    
-                    local newItem = {text_item = newText}
-                    table.insert(allFavoriteData, 1, newItem)
-                    loadMoreFavorites(true)
-                    
-                    Toast.makeText(ctx, "Added to favorites", Toast.LENGTH_SHORT).show()
-                end
+        }}
+    }
+    
+    Http.post(url, cjson.encode(payload), { ["Content-Type"] = "application/json" }, function(status, data)
+        if status == 200 then
+            local ok, decoded = pcall(cjson.decode, data)
+            if ok and decoded and decoded.candidates and decoded.candidates[1] then
+                local result = decoded.candidates[1].content.parts[1].text
+                callback(result, nil)
+            else
+                callback(nil, "Invalid API response")
             end
-            newDialog.dismiss()
-        end)
-        newDialog.setNegativeButton("Cancel", nil)
-        newDialog.show()
-    end
-    
-    favBtnExit.onClick = function()
-        favDialog.dismiss()
-    end
-    
-    favLvClipboard.onItemClick = function(l, v, p, i)
-        local item = favAdapter.getItem(p)
-        if item and item.text_item then
-            local text = tostring(item.text_item)
-            local manager = ctx.getSystemService(Context.CLIPBOARD_SERVICE)
-            manager.setPrimaryClip(ClipData.newPlainText("label", text))
-            Toast.makeText(ctx, "Copied: " .. text, Toast.LENGTH_SHORT).show()
+        else
+            callback(nil, "Error: " .. status)
         end
+    end)
+end
+
+-- ==================== ANALYZE IMAGE WITH GEMINI ====================
+function analyzeWithGemini(base64Data, prompt)
+    local apiKey = getGeminiApiKey()
+    if not apiKey or apiKey == "" then
+        return "API Key missing! Please set in Settings."
     end
     
-    favLvClipboard.setOnItemLongClickListener(AdapterView.OnItemLongClickListener({
-        onItemLongClick = function(parent, view, position, id)
-            local item = favAdapter.getItem(position)
-            if not item or not item.text_item then return true end
-            local text = tostring(item.text_item)
-            
-            local popup = ListPopupWindow(ctx)
-            local options = {"Remove from favorites", "Edit", "Delete"}
-            local adapter = ArrayAdapter(ctx, android.R.layout.simple_list_item_1, options)
-            popup.setAdapter(adapter)
-            popup.setAnchorView(view)
-            popup.setWidth(400)
-            popup.setHeight(300)
-            popup.setModal(true)
-            
-            popup.setOnItemClickListener(AdapterView.OnItemClickListener({
-                onItemClick = function(p, v, pos, id)
-                    if pos == 0 then
-                        deleteFromDB(text, "favorite_history")
-                        
-                        for i = 1, #allFavoriteData do
-                            if allFavoriteData[i] and allFavoriteData[i].text_item == text then
-                                table.remove(allFavoriteData, i)
-                                break
-                            end
-                        end
-                        
-                        loadMoreFavorites(true)
-                        
-                    elseif pos == 1 then
-                        showEditDialog(text, position, true, favAdapter, favLvClipboard, allFavoriteData)
-                        
-                    elseif pos == 2 then
-                        local confirmDialog = LuaDialog(ctx)
-                        confirmDialog.setTitle("Delete " .. text)
-                        confirmDialog.setMessage("Delete this item?")
-                        confirmDialog.setPositiveButton("DELETE", function()
-                            deleteFromDB(text, "favorite_history")
-                            
-                            for i = 1, #allFavoriteData do
-                                if allFavoriteData[i] and allFavoriteData[i].text_item == text then
-                                    table.remove(allFavoriteData, i)
-                                    break
-                                end
-                            end
-                            
-                            loadMoreFavorites(true)
-                            
-                            Toast.makeText(ctx, "Deleted", Toast.LENGTH_SHORT).show()
-                        end)
-                        confirmDialog.setNegativeButton("CANCEL", nil)
-                        confirmDialog.show()
-                    end
-                    popup.dismiss()
+    local resultText = ""
+    local completed = false
+    
+    callGeminiWithImage(apiKey, getGeminiModel(), base64Data, prompt, function(res, err)
+        completed = true
+        if res then
+            resultText = res
+        else
+            resultText = "Error: " .. (err or "Unknown error")
+        end
+    end)
+    
+    local waitTime = 0
+    while not completed and waitTime < 30000 do
+        Thread.sleep(100)
+        waitTime = waitTime + 100
+    end
+    
+    return resultText
+end
+
+-- ==================== IMAGE SELECTION ====================
+function scanAllImages()
+    notify("Scanning images...")
+    local foundFiles = {}
+    local contentResolver = ctx.getContentResolver()
+    local uri = MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+    local projection = { MediaStore.Images.Media.DATA, MediaStore.Images.Media.DISPLAY_NAME }
+    local cursor = contentResolver.query(uri, projection, nil, nil, MediaStore.Images.Media.DATE_ADDED .. " DESC")
+    
+    if cursor ~= nil then
+        local dataCol = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DATA)
+        local nameCol = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DISPLAY_NAME)
+        while cursor.moveToNext() do
+            local path = cursor.getString(dataCol)
+            local name = cursor.getString(nameCol)
+            if path and name then
+                table.insert(foundFiles, {path = path, name = name})
+            end
+        end
+        cursor.close()
+    end
+    
+    if #foundFiles > 0 then
+        local adapterData = {}
+        photoFilePaths = {}
+        for _, file in ipairs(foundFiles) do
+            table.insert(adapterData, file.name)
+            table.insert(photoFilePaths, file.path)
+        end
+        
+        local listLayout = LinearLayout(ctx)
+        listLayout.setOrientation(1)
+        local listView = ListView(ctx)
+        listView.setAdapter(ArrayAdapter(ctx, android.R.layout.simple_list_item_1, adapterData))
+        listLayout.addView(listView)
+        
+        local listDlg = LuaDialog(ctx)
+        listDlg.setTitle("Select Image")
+        listDlg.setView(listLayout)
+        listDlg.show()
+        
+        listView.setOnItemClickListener(AdapterView.OnItemClickListener{
+            onItemClick = function(p, v, pos, id)
+                selectedPhotoPath = photoFilePaths[pos + 1]
+                if _G.statusLabel then
+                    _G.statusLabel.setText("Selected: " .. File_CLASS(selectedPhotoPath).getName())
                 end
-            }))
-            
-            popup.show()
-            return true
-        end
-    }))
-    
-    favDialog.show()
-end
-
--- ==================== ABOUT AND SUPPORT ڈائیلاگ ====================
-local function showAboutDialog()
-    if not ctx then return end
-    
-    local aboutLayout = {
-        LinearLayout,
-        orientation = "vertical",
-        padding = "20dp",
-        layout_width = "match_parent",
-        {
-            TextView,
-            text = "My Clipboard Manager",
-            textSize = "20sp",
-            textColor = "#2196F3",
-            layout_marginBottom = "10dp",
-            gravity = "center"
-        },
-        {
-            TextView,
-            text = "Version 2.0 (with Google Drive Backup)",
-            textSize = "14sp",
-            layout_marginBottom = "20dp",
-            gravity = "center"
-        },
-        {
-            TextView,
-            text = "Features:\n• Save clipboard history\n• Favorites\n• Search\n• Load More Items (1000 at a time)\n• Google Drive Backup",
-            textSize = "14sp",
-            layout_marginBottom = "20dp"
-        },
-        {
-            Button,
-            text = "CLOSE",
-            layout_width = "match_parent",
-            backgroundColor = "#2196F3",
-            textColor = "#FFFFFF",
-            onClick = function() aboutDialog.dismiss() end
-        }
-    }
-    
-    local aboutDialog = LuaDialog(ctx)
-    aboutDialog.setTitle("About & Support")
-    aboutDialog.setView(loadlayout(aboutLayout))
-    aboutDialog.show()
-end
-
--- ==================== بیک اپ ڈائیلاگ ====================
-local function showBackupRestoreDialog()
-    if not ctx then return end
-    
-    -- پہلے چیک کریں کہ یوزر لاگ ان ہے یا نہیں
-    local name, email = getUserInfo()
-    
-    if not name then
-        -- لاگ ان نہیں، لاگ ان ڈائیلاگ دکھائیں
-        showLoginDialog()
-        return
-    end
-    
-    -- لاگ ان ہے، بیک اپ ڈائیلاگ دکھائیں
-    local backupLayout = {
-        LinearLayout,
-        orientation = "vertical",
-        padding = "20dp",
-        layout_width = "match_parent",
-        {
-            TextView,
-            text = "Google Drive Backup",
-            textSize = "18sp",
-            textColor = "#4CAF50",
-            gravity = "center",
-            layout_marginBottom = "20dp"
-        },
-        {
-            TextView,
-            id = "backupUserInfo",
-            text = "Connected as: " .. (name or "User"),
-            textSize = "14sp",
-            gravity = "center",
-            layout_marginBottom = "20dp"
-        },
-        {
-            Button,
-            id = "btnBackup",
-            text = "CREATE BACKUP",
-            layout_width = "match_parent",
-            backgroundColor = "#4CAF50",
-            textColor = "#FFFFFF",
-            layout_marginBottom = "10dp"
-        },
-        {
-            Button,
-            id = "btnRestore",
-            text = "RESTORE FROM BACKUP",
-            layout_width = "match_parent",
-            backgroundColor = "#FF9800",
-            textColor = "#FFFFFF",
-            layout_marginBottom = "10dp"
-        },
-        {
-            Button,
-            id = "btnBackupLogout",
-            text = "LOGOUT",
-            layout_width = "match_parent",
-            backgroundColor = "#F44336",
-            textColor = "#FFFFFF",
-            layout_marginBottom = "10dp"
-        },
-        {
-            Button,
-            text = "CANCEL",
-            layout_width = "match_parent",
-            backgroundColor = "#2196F3",
-            textColor = "#FFFFFF",
-            onClick = function() backupDialog.dismiss() end
-        }
-    }
-    
-    local backupDialog = LuaDialog(ctx)
-    backupDialog.setTitle("Backup Manager")
-    backupDialog.setView(loadlayout(backupLayout))
-    
-    if email then
-        backupUserInfo.setText("Connected as: " .. name .. "\n" .. email)
-    end
-    
-    btnBackup.onClick = function()
-        Toast.makeText(ctx, "Backup feature coming soon!", Toast.LENGTH_SHORT).show()
-    end
-    
-    btnRestore.onClick = function()
-        Toast.makeText(ctx, "Restore feature coming soon!", Toast.LENGTH_SHORT).show()
-    end
-    
-    btnBackupLogout.onClick = function()
-        local builder = AlertDialog.Builder(ctx)
-        builder.setTitle("Confirm Logout")
-        builder.setMessage("Are you sure you want to logout from Google Drive?")
-        builder.setPositiveButton("Yes", function()
-            logout()
-            backupDialog.dismiss()
-        end)
-        builder.setNegativeButton("No", nil)
-        builder.show()
-    end
-    
-    backupDialog.show()
-end
-
--- ==================== مین سرچ ڈیباؤنس ====================
-local mainSearchHandler = Handler()
-local mainSearchRunnable = nil
-
--- ==================== یوزر بٹن اپڈیٹ ====================
-local function updateUserButton()
-    local name, email = getUserInfo()
-    if name and btnUser then
-        btnUser.setText(name)
-    elseif btnUser then
-        btnUser.setText("USER NAME")
-    end
-end
-
--- بٹنز کے onClick ایونٹس
-btnUser.onClick = function() showProfileDialog() end
-btnAbout.onClick = function() showAboutDialog() end
-btnBackupRestore.onClick = function() showBackupRestoreDialog() end
-btnFav.onClick = function() showFavoritesDialog() end
-
-dlg.show()
-loadAllDataToCache()
-updateUserButton()
-
-btnKeyword.onClick = function()
-    btnKeyword.setVisibility(8)
-    mainButtonsContainer.setVisibility(8)
-    mainEtSearch.setVisibility(0)
-    mainBtnSearchCancel.setVisibility(0)
-    btnLoadMore.setVisibility(8)
-    mainEtSearch.requestFocus()
-    local imm = ctx.getSystemService(Context.INPUT_METHOD_SERVICE)
-    imm.toggleSoftInput(InputMethodManager.SHOW_FORCED, 0)
-end
-
-mainEtSearch.addTextChangedListener({
-    onTextChanged = function(s)
-        if mainSearchRunnable then mainSearchHandler.removeCallbacks(mainSearchRunnable) end
-        mainSearchRunnable = Runnable({
-            run = function()
-                searchInCache(allClipboardData, tostring(s), mainAdapter, false)
+                notify("Selected: " .. File_CLASS(selectedPhotoPath).getName())
+                listDlg.dismiss()
             end
         })
-        mainSearchHandler.postDelayed(mainSearchRunnable, 1000)
+    else
+        notify("No images found.")
     end
-})
+end
 
-mainBtnSearchCancel.onClick = function()
-    mainEtSearch.setVisibility(8)
-    mainBtnSearchCancel.setVisibility(8)
-    btnKeyword.setVisibility(0)
-    mainButtonsContainer.setVisibility(0)
-    mainEtSearch.setText("")
+-- ==================== SETTINGS DIALOG ====================
+function showAISettingsDialog()
+    local settingsLayout = LinearLayout(ctx)
+    settingsLayout.setOrientation(1)
+    settingsLayout.setPadding(40, 20, 40, 20)
     
-    if #allClipboardData > 0 then
-        loadMoreClipboardData(true)
-    end
+    local apiLabel = TextView(ctx)
+    apiLabel.setText("Gemini API Key:")
+    settingsLayout.addView(apiLabel)
     
-    local imm = ctx.getSystemService(Context.INPUT_METHOD_SERVICE)
-    imm.hideSoftInputFromWindow(mainEtSearch.getWindowToken(), 0)
-end
-
-btnLoadMore.onClick = function()
-    loadMoreClipboardData(false)
-end
-
--- مانیٹرنگ سسٹم
-local lastCheckedText = getClipText() or ""
-local isRunning = true
-local handler = Handler(Looper.getMainLooper())
-
-local function monitor()
-    if not isRunning then return end
-    local current = getClipText()
+    local apiInput = EditText(ctx)
+    apiInput.setHint("Enter your API key")
+    apiInput.setText(getGeminiApiKey())
+    apiInput.setInputType(InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD)
+    settingsLayout.addView(apiInput)
     
-    if current and current ~= "" and current ~= lastCheckedText then
-        lastCheckedText = current
-        saveToDB(current, "clipboard_history")
+    local modelLabel = TextView(ctx)
+    modelLabel.setText("Select Model:")
+    modelLabel.setPadding(0, 20, 0, 0)
+    settingsLayout.addView(modelLabel)
+    
+    local modelSpinner = Spinner(ctx)
+    local modelAdapter = ArrayAdapter(ctx, android.R.layout.simple_spinner_item, GEMINI_MODELS)
+    modelSpinner.setAdapter(modelAdapter)
+    local savedModel = getGeminiModel()
+    for i = 1, #GEMINI_MODELS do
+        if GEMINI_MODELS[i] == savedModel then
+            modelSpinner.setSelection(i - 1)
+            break
+        end
     end
-    handler.postDelayed(Runnable({run = monitor}), 500)
+    settingsLayout.addView(modelSpinner)
+    
+    local infoText = TextView(ctx)
+    infoText.setText("Get API key from: makersuite.google.com/app/apikey")
+    infoText.setTextSize(11)
+    infoText.setTextColor(0xFF888888)
+    infoText.setPadding(0, 20, 0, 0)
+    settingsLayout.addView(infoText)
+    
+    local settingsDlg = LuaDialog(ctx)
+    settingsDlg.setTitle("AI Engine Settings")
+    settingsDlg.setView(settingsLayout)
+    settingsDlg.setPositiveButton("Save", function()
+        local newKey = apiInput.getText().toString()
+        if newKey ~= "" then
+            saveGeminiApiKey(newKey)
+        end
+        saveGeminiModel(GEMINI_MODELS[modelSpinner.getSelectedItemPosition() + 1])
+        notify("Settings saved")
+        settingsDlg.dismiss()
+    end)
+    settingsDlg.setNegativeButton("Cancel", nil)
+    settingsDlg.show()
 end
-monitor()
 
-btnExit.onClick = function()
-    isRunning = false
-    handler.removeCallbacksAndMessages(nil)
-    dlg.dismiss()
-end
-
-lvClipboard.onItemClick = function(l, v, p, i)
-    local item = mainAdapter.getItem(p)
-    if item and item.text_item then
-        local text = tostring(item.text_item)
-        local manager = ctx.getSystemService(Context.CLIPBOARD_SERVICE)
-        manager.setPrimaryClip(ClipData.newPlainText("label", text))
-        lastCheckedText = text
-        Toast.makeText(ctx, "Copied: " .. text, Toast.LENGTH_SHORT).show()
-    end
-end
-
-lvClipboard.setOnItemLongClickListener(AdapterView.OnItemLongClickListener({
-    onItemLongClick = function(parent, view, position, id)
-        local item = mainAdapter.getItem(position)
-        if not item or not item.text_item then return true end
-        local text = tostring(item.text_item)
-        
-        local popup = ListPopupWindow(ctx)
-        local options = {"Add to favorites", "Edit", "Delete"}
-        local adapter = ArrayAdapter(ctx, android.R.layout.simple_list_item_1, options)
-        popup.setAdapter(adapter)
-        popup.setAnchorView(view)
-        popup.setWidth(400)
-        popup.setHeight(300)
-        popup.setModal(true)
-        
-        popup.setOnItemClickListener(AdapterView.OnItemClickListener({
-            onItemClick = function(p, v, pos, id)
-                if pos == 0 then
-                    saveToDB(text, "favorite_history")
-                    
-                    local newItem = {text_item = text}
-                    
-                    for i = 1, #allFavoriteData do
-                        if allFavoriteData[i] and allFavoriteData[i].text_item == text then
-                            table.remove(allFavoriteData, i)
-                            break
-                        end
-                    end
-                    
-                    table.insert(allFavoriteData, 1, newItem)
-                    
-                    Toast.makeText(ctx, "Added to favorites", Toast.LENGTH_SHORT).show()
-                    
-                elseif pos == 1 then
-                    showEditDialog(text, position, false, mainAdapter, lvClipboard, allClipboardData)
-                    
-                elseif pos == 2 then
-                    local confirmDialog = LuaDialog(ctx)
-                    confirmDialog.setTitle("Delete " .. text)
-                    confirmDialog.setMessage("Delete this item?")
-                    confirmDialog.setPositiveButton("DELETE", function()
-                        deleteFromDB(text, "clipboard_history")
-                        
-                        for i = 1, #allClipboardData do
-                            if allClipboardData[i] and allClipboardData[i].text_item == text then
-                                table.remove(allClipboardData, i)
-                                break
-                            end
-                        end
-                        
-                        if #allClipboardData > 0 then
-                            loadMoreClipboardData(true)
-                        end
-                        
-                        Toast.makeText(ctx, "Deleted", Toast.LENGTH_SHORT).show()
-                    end)
-                    confirmDialog.setNegativeButton("CANCEL", nil)
-                    confirmDialog.show()
-                end
-                popup.dismiss()
+-- ==================== ABOUT AND SUPPORT ====================
+function aboutAndSupport()
+    vibrate()
+    
+    local help_views = {}
+    local help_layout = {
+        LinearLayout;
+        orientation = "vertical";
+        padding = "16dp";
+        layout_width = "fill";
+        layout_height = "wrap";
+        {
+            TextView;
+            text = "Image Recognizer Pro provides AI-powered image recognition using Google Gemini AI.\n\nFeatures:\n• 4 recognition modes (Image Process, Current Screen, Current Item, Extract Text Only)\n• Multi-language support (18+ languages)\n• Google Gemini AI integration\n• Current item/screen recognition using accessibility services\n\nJoin our community for more useful tools, feedback, and suggestions.";
+            textSize = 14;
+            textColor = "#666666";
+            gravity = "left";
+            paddingBottom = "20dp";
+        };
+        {
+            TextView;
+            text = "Join Our Community";
+            textSize = 16;
+            textColor = "#000000";
+            gravity = "center";
+            paddingBottom = "10dp";
+        };
+        {
+            ScrollView;
+            layout_width = "fill";
+            layout_height = "wrap_content";
+            {
+                LinearLayout;
+                orientation = "vertical";
+                layout_width = "fill";
+                layout_height = "wrap_content";
+                gravity = "center";
+                layout_marginTop = "5dp";
+                {
+                    Button;
+                    id = "joinWhatsAppGroupButton";
+                    text = "JOIN WHATSAPP GROUP";
+                    layout_width = "fill";
+                    layout_height = "wrap_content";
+                    layout_margin = "2dp";
+                    textSize = "12sp";
+                    padding = "8dp";
+                    backgroundColor = "#25D366";
+                    textColor = "#FFFFFF";
+                };
+                {
+                    Button;
+                    id = "joinYouTubeChannelButton";
+                    text = "JOIN YOUTUBE CHANNEL";
+                    layout_width = "fill";
+                    layout_height = "wrap_content";
+                    layout_margin = "2dp";
+                    textSize = "12sp";
+                    padding = "8dp";
+                    backgroundColor = "#FF0000";
+                    textColor = "#FFFFFF";
+                };
+                {
+                    Button;
+                    id = "joinTelegramChannelButton";
+                    text = "JOIN TELEGRAM CHANNEL";
+                    layout_width = "fill";
+                    layout_height = "wrap_content";
+                    layout_margin = "2dp";
+                    textSize = "12sp";
+                    padding = "8dp";
+                    backgroundColor = "#2196F3";
+                    textColor = "#FFFFFF";
+                };
+                {
+                    Button;
+                    id = "goBackButton";
+                    text = "GO BACK";
+                    layout_width = "fill";
+                    layout_height = "wrap_content";
+                    layout_margin = "2dp";
+                    textSize = "12sp";
+                    padding = "8dp";
+                    backgroundColor = "#9E9E9E";
+                    textColor = "#FFFFFF";
+                };
+            };
+        };
+    }
+    
+    local help_dialog = LuaDialog(ctx)
+    help_dialog.setTitle("Developer: Sabir Jamil")
+    help_dialog.setView(loadlayout(help_layout, help_views))
+    help_dialog.setCancelable(true)
+    
+    help_views.joinWhatsAppGroupButton.onClick = function()
+        local function performActions()
+            help_dialog.dismiss()
+            if mainDlg then
+                mainDlg.dismiss()
             end
-        }))
-        
-        popup.show()
-        return true
+            local success = pcall(function()
+                local message = "Assalam%20o%20Alaikum.%20I%20hope%20you%20are%20doing%20well.%20I%20would%20like%20to%20join%20your%20WhatsApp%20group.%20Kindly%20share%20the%20instructions.%20group%20rules%20and%20regulations.%20Thank%20you.%20so%20much"
+                local url = "https://wa.me/923486623399?text=" .. message
+                local intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
+                ctx.startActivity(intent)
+            end)
+            if not success then
+                notify("Could not open WhatsApp")
+            end
+        end
+        if service and service.speak then
+            service.speak("Opening WhatsApp Group")
+            local handler = Handler(Looper.getMainLooper())
+            handler.postDelayed(Runnable({
+                run = performActions
+            }), 1000)
+        else
+            performActions()
+        end
     end
-}))
+    
+    help_views.joinYouTubeChannelButton.onClick = function()
+        local function performActions()
+            help_dialog.dismiss()
+            if mainDlg then
+                mainDlg.dismiss()
+            end
+            local success = pcall(function()
+                local url = "https://www.youtube.com/@TechForVI"
+                local intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
+                ctx.startActivity(intent)
+            end)
+            if not success then
+                notify("Could not open YouTube")
+            end
+        end
+        if service and service.speak then
+            service.speak("Opening YouTube Channel")
+            local handler = Handler(Looper.getMainLooper())
+            handler.postDelayed(Runnable({
+                run = performActions
+            }), 1000)
+        else
+            performActions()
+        end
+    end
+    
+    help_views.joinTelegramChannelButton.onClick = function()
+        local function performActions()
+            help_dialog.dismiss()
+            if mainDlg then
+                mainDlg.dismiss()
+            end
+            local success = pcall(function()
+                local url = "https://t.me/TechForVI"
+                local intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
+                intent.setPackage("org.telegram.messenger")
+                ctx.startActivity(intent)
+            end)
+            if not success then
+                pcall(function()
+                    local url = "https://t.me/TechForVI"
+                    local intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
+                    ctx.startActivity(intent)
+                end)
+            end
+        end
+        if service and service.speak then
+            service.speak("Opening Telegram Channel")
+            local handler = Handler(Looper.getMainLooper())
+            handler.postDelayed(Runnable({
+                run = performActions
+            }), 1000)
+        else
+            performActions()
+        end
+    end
+    
+    help_views.goBackButton.onClick = function()
+        help_dialog.dismiss()
+    end
+    
+    help_dialog.setOnCancelListener{
+        onCancel = function()
+            help_dialog.dismiss()
+        end
+    }
+    
+    help_dialog.show()
+end
+
+-- ==================== MAIN UI ====================
+function createMainUI()
+    local layout = LinearLayout(ctx)
+    layout.setOrientation(1)
+    layout.setPadding(40, 40, 40, 40)
+    
+    local devLabel = TextView(ctx)
+    devLabel.setText("Developer: Sabir Jamil")
+    devLabel.setGravity(Gravity.CENTER)
+    layout.addView(devLabel)
+    
+    local btnScan = Button(ctx)
+    btnScan.setText("CHOOSE FROM GALLERY")
+    btnScan.onClick = function() scanAllImages() end
+    layout.addView(btnScan)
+    
+    _G.statusLabel = TextView(ctx)
+    _G.statusLabel.setText("No file selected")
+    _G.statusLabel.setPadding(0, 20, 0, 20)
+    _G.statusLabel.setGravity(Gravity.CENTER)
+    layout.addView(_G.statusLabel)
+    
+    -- Language Selection
+    local langLabel = TextView(ctx)
+    langLabel.setText("Select Output Language:")
+    langLabel.setTextSize(13)
+    layout.addView(langLabel)
+    
+    local langSpinner = Spinner(ctx)
+    local langAdapter = ArrayAdapter(ctx, android.R.layout.simple_spinner_item, POPULAR_LANGUAGES)
+    langSpinner.setAdapter(langAdapter)
+    local savedLang = getSelectedLanguage()
+    for i = 1, #POPULAR_LANGUAGES do
+        if POPULAR_LANGUAGES[i] == savedLang then
+            langSpinner.setSelection(i - 1)
+        end
+    end
+    langSpinner.setOnItemSelectedListener(AdapterView.OnItemSelectedListener{
+        onItemSelected = function(p, v, pos, id)
+            saveSelectedLanguage(POPULAR_LANGUAGES[pos + 1])
+        end
+    })
+    layout.addView(langSpinner)
+    
+    -- Recognition Mode Spinner
+    local recLabel = TextView(ctx)
+    recLabel.setText("Recognition Mode:")
+    recLabel.setTextSize(13)
+    recLabel.setPadding(0, 15, 0, 0)
+    layout.addView(recLabel)
+    
+    local recSpinner = Spinner(ctx)
+    local recAdapter = ArrayAdapter(ctx, android.R.layout.simple_spinner_item, RECOGNIZE_OPTIONS)
+    recSpinner.setAdapter(recAdapter)
+    local savedOpt = getSelectedRecognizeOption()
+    for i = 1, #RECOGNIZE_OPTIONS do
+        if RECOGNIZE_OPTIONS[i] == savedOpt then
+            recSpinner.setSelection(i - 1)
+        end
+    end
+    recSpinner.setOnItemSelectedListener(AdapterView.OnItemSelectedListener{
+        onItemSelected = function(p, v, pos, id)
+            saveSelectedRecognizeOption(RECOGNIZE_OPTIONS[pos + 1])
+        end
+    })
+    layout.addView(recSpinner)
+    
+    -- Process Button
+    processButton = Button(ctx)
+    processButton.setText("Process")
+    processButton.setBackgroundColor(0xFFFF9800)
+    processButton.onClick = function()
+        processButton.setEnabled(false)
+        processButton.setText("Processing Please Wait...")
+        processButton.setBackgroundColor(0xFF999999)
+        
+        local selectedOption = getSelectedRecognizeOption()
+        
+        if selectedOption == "Current Screen" then
+            if mainDlg then 
+                mainDlg.dismiss()
+                mainDlg = nil
+            end
+            
+            local handler = Handler(Looper.getMainLooper())
+            handler.postDelayed(Runnable({
+                run = function()
+                    local result = analyzeCurrentScreen()
+                    local resultDlg = LuaDialog(ctx)
+                    resultDlg.setTitle("Screen Analysis")
+                    local scrollView = ScrollView(ctx)
+                    local textView = TextView(ctx)
+                    textView.setText(result)
+                    textView.setTextSize(14)
+                    textView.setPadding(30, 20, 30, 20)
+                    textView.setTextColor(0xFF000000)
+                    scrollView.addView(textView)
+                    resultDlg.setView(scrollView)
+                    resultDlg.setPositiveButton("Close", nil)
+                    resultDlg.setNeutralButton("Copy", function()
+                        local clipboard = ctx.getSystemService(Context.CLIPBOARD_SERVICE)
+                        clipboard.setText(result)
+                        if service and service.speak then
+                            service.speak("Copied to clipboard successfully")
+                        end
+                        Toast.makeText(ctx, "Copied to clipboard successfully", Toast.LENGTH_SHORT).show()
+                        vibrate()
+                    end)
+                    resultDlg.show()
+                    
+                    processButton.setEnabled(true)
+                    processButton.setText("Process")
+                    processButton.setBackgroundColor(0xFFFF9800)
+                end
+            }), 500)
+            
+        elseif selectedOption == "Current Item" then
+            if mainDlg then 
+                mainDlg.dismiss()
+                mainDlg = nil
+            end
+            
+            local handler = Handler(Looper.getMainLooper())
+            handler.postDelayed(Runnable({
+                run = function()
+                    local result = analyzeCurrentItem()
+                    local resultDlg = LuaDialog(ctx)
+                    resultDlg.setTitle("Item Analysis")
+                    local scrollView = ScrollView(ctx)
+                    local textView = TextView(ctx)
+                    textView.setText(result)
+                    textView.setTextSize(14)
+                    textView.setPadding(30, 20, 30, 20)
+                    textView.setTextColor(0xFF000000)
+                    scrollView.addView(textView)
+                    resultDlg.setView(scrollView)
+                    resultDlg.setPositiveButton("Close", nil)
+                    resultDlg.setNeutralButton("Copy", function()
+                        local clipboard = ctx.getSystemService(Context.CLIPBOARD_SERVICE)
+                        clipboard.setText(result)
+                        if service and service.speak then
+                            service.speak("Copied to clipboard successfully")
+                        end
+                        Toast.makeText(ctx, "Copied to clipboard successfully", Toast.LENGTH_SHORT).show()
+                        vibrate()
+                    end)
+                    resultDlg.show()
+                    
+                    processButton.setEnabled(true)
+                    processButton.setText("Process")
+                    processButton.setBackgroundColor(0xFFFF9800)
+                end
+            }), 500)
+            
+        elseif selectedOption == "Image Process" or selectedOption == "Extract Text Only" then
+            if selectedPhotoPath == "" then
+                notify("Please select an image first")
+                processButton.setEnabled(true)
+                processButton.setText("Process")
+                processButton.setBackgroundColor(0xFFFF9800)
+                return
+            end
+            local apiKey = getGeminiApiKey()
+            if not apiKey or apiKey == "" then
+                notify("API Key missing! Set in Settings")
+                processButton.setEnabled(true)
+                processButton.setText("Process")
+                processButton.setBackgroundColor(0xFFFF9800)
+                return
+            end
+            
+            local base64Data = pathToBase64(selectedPhotoPath)
+            if not base64Data then
+                notify("Failed to process image")
+                processButton.setEnabled(true)
+                processButton.setText("Process")
+                processButton.setBackgroundColor(0xFFFF9800)
+                return
+            end
+            
+            local prompt = ""
+            if selectedOption == "Extract Text Only" then
+                prompt = "Extract only the text from this image. Output the text exactly as seen."
+            else
+                prompt = "Analyze this image in detail. Describe what you see, including objects, people, text, colors, and context. Provide the response in " .. getSelectedLanguage()
+            end
+            
+            notify("Processing with Gemini AI...")
+            
+            callGeminiWithImage(apiKey, getGeminiModel(), base64Data, prompt, function(res, err)
+                local resultDlg = LuaDialog(ctx)
+                resultDlg.setTitle("Result")
+                
+                local scrollView = ScrollView(ctx)
+                local textView = TextView(ctx)
+                local resultText = res or "Error: " .. (err or "Unknown")
+                textView.setText(resultText)
+                textView.setTextSize(14)
+                textView.setPadding(30, 20, 30, 20)
+                textView.setTextColor(0xFF000000)
+                scrollView.addView(textView)
+                resultDlg.setView(scrollView)
+                
+                resultDlg.setPositiveButton("Close", nil)
+                resultDlg.setNeutralButton("Copy", function()
+                    local clipboard = ctx.getSystemService(Context.CLIPBOARD_SERVICE)
+                    clipboard.setText(resultText)
+                    if service and service.speak then
+                        service.speak("Copied to clipboard successfully")
+                    end
+                    Toast.makeText(ctx, "Copied to clipboard successfully", Toast.LENGTH_SHORT).show()
+                    vibrate()
+                end)
+                resultDlg.show()
+                vibrate()
+                
+                processButton.setEnabled(true)
+                processButton.setText("Process")
+                processButton.setBackgroundColor(0xFFFF9800)
+            end)
+        end
+    end
+    layout.addView(processButton)
+    
+    -- Bottom Buttons
+    local bottomLayout = LinearLayout(ctx)
+    bottomLayout.setOrientation(0)
+    bottomLayout.setLayoutParams(LinearLayout.LayoutParams(-1, -2))
+    bottomLayout.setPadding(0, 20, 0, 0)
+    
+    local btnSettings = Button(ctx)
+    btnSettings.setText("Settings")
+    btnSettings.setLayoutParams(LinearLayout.LayoutParams(0, -2, 1))
+    btnSettings.onClick = function() showAISettingsDialog() end
+    bottomLayout.addView(btnSettings)
+    
+    local btnAbout = Button(ctx)
+    btnAbout.setText("About & Support")
+    btnAbout.setLayoutParams(LinearLayout.LayoutParams(0, -2, 1))
+    btnAbout.onClick = function() aboutAndSupport() end
+    bottomLayout.addView(btnAbout)
+    
+    local btnExit = Button(ctx)
+    btnExit.setText("Exit")
+    btnExit.setLayoutParams(LinearLayout.LayoutParams(0, -2, 1))
+    btnExit.setBackgroundColor(0xFFF44336)
+    btnExit.onClick = function()
+        if mainDlg then
+            mainDlg.dismiss()
+            mainDlg = nil
+        end
+    end
+    bottomLayout.addView(btnExit)
+    
+    layout.addView(bottomLayout)
+    
+    mainDlg = LuaDialog(ctx)
+    mainDlg.setTitle("Image Recognizer Pro")
+    mainDlg.setView(layout)
+    mainDlg.show()
+end
+
+-- Start the plugin
+createMainUI()
